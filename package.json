@@ -1,0 +1,30 @@
+{
+  "name": "argus-rpc",
+  "version": "0.0.0",
+  "description": "A lightweight TypeScript-native RPC protocol over raw TCP built for learning, experimentation, benchmarking, and infrastructure research.",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "bench": "tsx benchmarks/argus-vs-rest.ts"
+  },
+  "keywords": [
+    "rpc",
+    "tcp",
+    "typescript",
+    "protocol",
+    "binary-framing",
+    "networking",
+    "distributed-systems",
+    "infrastructure"
+  ],
+  "author": "Williams Ashibuogwu (wbizmo)",
+  "license": "SEE LICENSE IN LICENSE"
+}

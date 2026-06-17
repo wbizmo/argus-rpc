@@ -1,4 +1,5 @@
 import net from "node:net";
+import { ArgusError } from "../errors";
 import {
   ArgusMessageType,
   createFrame,
@@ -53,14 +54,24 @@ export class ArgusClient {
     });
 
     this.socket.on("close", () => {
-      this.rejectAll(new Error("ARGUS_CONNECTION_CLOSED"));
+      this.rejectAll(
+        new ArgusError({
+          code: "ARGUS_CONNECTION_CLOSED",
+          message: "Argus connection closed"
+        })
+      );
     });
 
     await new Promise<void>((resolve, reject) => {
       const socket = this.socket;
 
       if (!socket) {
-        reject(new Error("ARGUS_SOCKET_NOT_CREATED"));
+        reject(
+          new ArgusError({
+            code: "ARGUS_SOCKET_NOT_CREATED",
+            message: "Argus socket could not be created"
+          })
+        );
         return;
       }
 
@@ -101,7 +112,17 @@ export class ArgusClient {
     return new Promise<TResponse>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(messageId);
-        reject(new Error("ARGUS_REQUEST_TIMEOUT"));
+        reject(
+          new ArgusError({
+            code: "ARGUS_REQUEST_TIMEOUT",
+            message: `Argus request timed out after ${timeoutMs}ms`,
+            details: {
+              method,
+              messageId,
+              timeoutMs
+            }
+          })
+        );
       }, timeoutMs);
 
       this.pending.set(messageId, {
@@ -114,8 +135,47 @@ export class ArgusClient {
     });
   }
 
+  async ping(timeoutMs = this.timeoutMs): Promise<boolean> {
+    await this.connect();
+
+    const socket = this.getSocket();
+    const messageId = this.nextMessageId++;
+
+    const frame = createFrame({
+      type: ArgusMessageType.PING,
+      messageId,
+      method: "",
+      payload: null
+    });
+
+    return new Promise<boolean>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(messageId);
+        reject(
+          new ArgusError({
+            code: "ARGUS_PING_TIMEOUT",
+            message: `Argus ping timed out after ${timeoutMs}ms`
+          })
+        );
+      }, timeoutMs);
+
+      this.pending.set(messageId, {
+        resolve: () => resolve(true),
+        reject,
+        timer
+      });
+
+      socket.write(encodeFrame(frame));
+    });
+  }
+
   async close(): Promise<void> {
-    this.rejectAll(new Error("ARGUS_CLIENT_CLOSED"));
+    this.rejectAll(
+      new ArgusError({
+        code: "ARGUS_CLIENT_CLOSED",
+        message: "Argus client closed"
+      })
+    );
 
     if (!this.socket) {
       return;
@@ -148,12 +208,22 @@ export class ArgusClient {
       clearTimeout(pending.timer);
       this.pending.delete(frame.messageId);
 
+      if (frame.type === ArgusMessageType.PONG) {
+        pending.resolve(true);
+        continue;
+      }
+
       const payload = parsePayload(frame.payload);
 
       if (frame.type === ArgusMessageType.ERROR) {
-        const errorPayload = payload as { code?: string; message?: string } | undefined;
+        const errorPayload = payload as { code?: string; message?: string; details?: unknown } | undefined;
+
         pending.reject(
-          new Error(errorPayload?.code ?? errorPayload?.message ?? "ARGUS_REMOTE_ERROR")
+          new ArgusError({
+            code: errorPayload?.code ?? "ARGUS_REMOTE_ERROR",
+            message: errorPayload?.message ?? "Argus remote error",
+            details: errorPayload?.details
+          })
         );
         continue;
       }
@@ -164,7 +234,10 @@ export class ArgusClient {
 
   private getSocket(): net.Socket {
     if (!this.socket || this.socket.destroyed) {
-      throw new Error("ARGUS_CLIENT_NOT_CONNECTED");
+      throw new ArgusError({
+        code: "ARGUS_CLIENT_NOT_CONNECTED",
+        message: "Argus client is not connected"
+      });
     }
 
     return this.socket;

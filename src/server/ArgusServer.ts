@@ -1,4 +1,6 @@
 import net from "node:net";
+import { ConnectionManager } from "../connection";
+import { ArgusError } from "../errors";
 import { MethodRegistry, type ArgusMethodHandler } from "./method-registry";
 import {
   ArgusMessageType,
@@ -8,9 +10,14 @@ import {
 } from "../protocol";
 import { parsePayload, serializePayload } from "../protocol/json";
 
+export interface ArgusServerStats {
+  connections: number;
+  methods: number;
+}
+
 export class ArgusServer {
   private readonly registry = new MethodRegistry();
-  private readonly sockets = new Set<net.Socket>();
+  private readonly connections = new ConnectionManager();
   private server: net.Server | null = null;
 
   method(name: string, handler: ArgusMethodHandler): this {
@@ -22,9 +29,19 @@ export class ArgusServer {
     return this.registry.list();
   }
 
+  stats(): ArgusServerStats {
+    return {
+      connections: this.connections.count(),
+      methods: this.registry.list().length
+    };
+  }
+
   async listen(port = 0, host = "127.0.0.1"): Promise<number> {
     if (this.server) {
-      throw new Error("ARGUS_SERVER_ALREADY_LISTENING");
+      throw new ArgusError({
+        code: "ARGUS_SERVER_ALREADY_LISTENING",
+        message: "Argus server is already listening"
+      });
     }
 
     this.server = net.createServer((socket) => {
@@ -50,18 +67,17 @@ export class ArgusServer {
     const address = this.server.address();
 
     if (!address || typeof address === "string") {
-      throw new Error("ARGUS_INVALID_SERVER_ADDRESS");
+      throw new ArgusError({
+        code: "ARGUS_INVALID_SERVER_ADDRESS",
+        message: "Argus server could not resolve a valid listening address"
+      });
     }
 
     return address.port;
   }
 
   async close(): Promise<void> {
-    for (const socket of this.sockets) {
-      socket.destroy();
-    }
-
-    this.sockets.clear();
+    this.connections.destroyAll();
 
     if (!this.server) {
       return;
@@ -83,7 +99,7 @@ export class ArgusServer {
   }
 
   private handleSocket(socket: net.Socket): void {
-    this.sockets.add(socket);
+    this.connections.add(socket);
 
     let pendingBuffer = Buffer.alloc(0);
 
@@ -99,27 +115,17 @@ export class ArgusServer {
           await this.handleFrame(socket, frame);
         }
       } catch (error) {
+        const argusError = ArgusError.fromUnknown(error, "ARGUS_INVALID_FRAME");
+
         const response = createFrame({
           type: ArgusMessageType.ERROR,
           messageId: 0,
           method: "",
-          payload: {
-            code: "ARGUS_INVALID_FRAME",
-            message: error instanceof Error ? error.message : "Invalid frame"
-          }
+          payload: argusError.toJSON()
         });
 
         socket.write(encodeFrame(response));
       }
-    });
-
-    socket.on("close", () => {
-      this.sockets.delete(socket);
-    });
-
-    socket.on("error", () => {
-      this.sockets.delete(socket);
-      socket.destroy();
     });
   }
 
@@ -132,6 +138,18 @@ export class ArgusServer {
       payload: Buffer;
     }
   ): Promise<void> {
+    if (frame.type === ArgusMessageType.PING) {
+      const response = createFrame({
+        type: ArgusMessageType.PONG,
+        messageId: frame.messageId,
+        method: "",
+        payload: null
+      });
+
+      socket.write(encodeFrame(response));
+      return;
+    }
+
     if (frame.type !== ArgusMessageType.REQUEST) {
       return;
     }
@@ -149,14 +167,13 @@ export class ArgusServer {
 
       socket.write(encodeFrame(response));
     } catch (error) {
+      const argusError = ArgusError.fromUnknown(error, "ARGUS_HANDLER_ERROR");
+
       const response = createFrame({
         type: ArgusMessageType.ERROR,
         messageId: frame.messageId,
         method: frame.method,
-        payload: {
-          code: error instanceof Error ? error.message : "ARGUS_HANDLER_ERROR",
-          message: error instanceof Error ? error.message : "Handler failed"
-        }
+        payload: argusError.toJSON()
       });
 
       socket.write(encodeFrame(response));

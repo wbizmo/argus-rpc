@@ -19,4 +19,6 @@
  * Williams Ashibuogwu (wbizmo)
  */
 
-export const ARGUS_VERSION = "0.0.0";
+export const ARGUS_PACKAGE_VERSION = "0.0.0";
+
+export * from "./protocol";

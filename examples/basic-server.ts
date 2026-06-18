@@ -1,23 +1,25 @@
 import { ArgusServer } from "../src";
 
-const server = new ArgusServer();
+async function main(): Promise<void> {
+  const server = new ArgusServer();
 
-server.method("user.get", async (payload) => {
-  const input = payload as { id: number };
+  server.method("user.get", async (payload) => {
+    const input = payload as {
+      id: number;
+    };
 
-  return {
-    id: input.id,
-    name: "Williams"
-  };
+    return {
+      id: input.id,
+      name: "Williams"
+    };
+  });
+
+  const port = await server.listen(7000);
+
+  console.log(`Argus server listening on port ${port}`);
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
 });
-
-server.method("system.ping", async () => {
-  return {
-    ok: true,
-    service: "argus-rpc"
-  };
-});
-
-const port = await server.listen(7000);
-
-console.log(`Argus server listening on tcp://127.0.0.1:${port}`);

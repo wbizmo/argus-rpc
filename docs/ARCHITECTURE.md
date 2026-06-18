@@ -1,75 +1,144 @@
 # Architecture
 
-Argus is built around a small set of focused runtime components.
+Argus is intentionally small.
+
+The project exists to explore protocol design, transport behavior, and reliability concepts.
+
+## High-Level Flow
 
 ```txt
 Client
-  ↓
-Retry Layer
-  ↓
-Connection Pool
-  ↓
+  │
+  ▼
+Argus Frame Encoder
+  │
+  ▼
 TCP Socket
-  ↓
-Binary Decoder
-  ↓
+  │
+  ▼
 Argus Server
-  ↓
+  │
+  ▼
 Method Registry
-  ↓
+  │
+  ▼
 Handler
+  │
+  ▼
+Response Frame
+  │
+  ▼
+Client
 ```
 
-## Client Responsibilities
+## Core Components
 
-The client is responsible for:
+### Protocol Layer
 
-* Creating requests
-* Assigning message IDs
-* Tracking pending requests
-* Managing timeouts
-* Sending heartbeats
-* Retrying failed calls
-* Reusing pooled connections
+Location:
 
-## Server Responsibilities
-
-The server is responsible for:
-
-* Accepting TCP connections
-* Decoding frames
-* Executing registered methods
-* Returning responses
-* Returning structured errors
-* Cleaning up dead connections
-
-## Method Registry
-
-Methods are registered by name.
-
-Example:
-
-```ts
-server.method("user.get", async (payload) => {
-  return {
-    id: payload.id,
-    name: "Williams"
-  };
-});
+```txt
+src/protocol
 ```
 
-## Reliability Model
+Responsibilities:
 
-Argus is built around awareness of connection state.
+* Frame creation
+* Frame encoding
+* Frame decoding
+* Message parsing
+* Protocol validation
 
-Every request receives a message ID.
+## Server Layer
 
-Every pending request can timeout.
+Location:
 
-Every connection can be monitored through heartbeats.
+```txt
+src/server
+```
 
-Every dead connection can be removed.
+Responsibilities:
 
-Every failed request can be retried.
+* TCP server lifecycle
+* Request processing
+* Method execution
+* Error responses
+* Heartbeat responses
 
-This reliability model reflects the core Argus philosophy of vigilance through observability.
+## Client Layer
+
+Location:
+
+```txt
+src/client
+```
+
+Responsibilities:
+
+* TCP connectivity
+* Request tracking
+* Response correlation
+* Timeout management
+* Retry behavior
+
+## Error Layer
+
+Location:
+
+```txt
+src/errors
+```
+
+Responsibilities:
+
+* Structured error model
+* Protocol-safe error transport
+
+## Connection Layer
+
+Location:
+
+```txt
+src/connection
+```
+
+Responsibilities:
+
+* Heartbeats
+* Connection tracking
+* Connection cleanup
+
+## Testing Strategy
+
+Argus uses:
+
+```txt
+Unit Tests
+Integration Tests
+Failure-Mode Tests
+Benchmark Validation
+```
+
+The goal is to verify both correctness and reliability behavior.
+
+## Why "Argus"?
+
+Argus is named after Argus Panoptes, the many-eyed guardian associated with vigilance.
+
+The protocol emphasizes:
+
+* Awareness of connection state
+* Request tracking
+* Failure detection
+* Heartbeats
+* Observability
+
+The name reflects a protocol designed to keep watch over communication between services.
+
+## Author
+
+Williams Ashibuogwu (wbizmo)
+
+GitHub:
+
+github.com/wbizmo

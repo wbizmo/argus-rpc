@@ -1,60 +1,151 @@
 # Protocol Specification
 
-Argus uses a compact binary frame format over raw TCP.
-
-Version 1 focuses on explicit framing, request correlation, structured errors, and connection awareness.
+Argus is a binary framed RPC protocol built on raw TCP.
 
 ## Frame Layout
 
 ```txt
-+------------------+
-| MAGIC      2 B   |
-+------------------+
-| VERSION    1 B   |
-+------------------+
-| TYPE       1 B   |
-+------------------+
-| MESSAGE ID 4 B   |
-+------------------+
-| METHOD LEN 2 B   |
-+------------------+
-| PAYLOAD LEN 4 B  |
-+------------------+
-| METHOD           |
-+------------------+
-| PAYLOAD          |
-+------------------+
+MAGIC        2 bytes
+VERSION      1 byte
+TYPE         1 byte
+MESSAGE_ID   4 bytes
+METHOD_LEN   2 bytes
+PAYLOAD_LEN  4 bytes
+METHOD       variable
+PAYLOAD      variable
 ```
 
-## Fields
+Total fixed header size:
 
-| Field       | Size     | Description                |
-| ----------- | -------- | -------------------------- |
-| MAGIC       | 2 bytes  | Protocol identifier (`AR`) |
-| VERSION     | 1 byte   | Protocol version           |
-| TYPE        | 1 byte   | Frame type                 |
-| MESSAGE_ID  | 4 bytes  | Request correlation ID     |
-| METHOD_LEN  | 2 bytes  | Method name length         |
-| PAYLOAD_LEN | 4 bytes  | Payload length             |
-| METHOD      | Variable | UTF-8 method name          |
-| PAYLOAD     | Variable | Serialized payload         |
+```txt
+14 bytes
+```
+
+## Magic Bytes
+
+Argus frames begin with:
+
+```txt
+AR
+```
+
+This identifies the payload as an Argus frame.
+
+## Version
+
+Current version:
+
+```txt
+1
+```
+
+Unsupported versions are rejected.
 
 ## Message Types
 
-Argus v1 supports:
+```txt
+REQUEST
+RESPONSE
+ERROR
+PING
+PONG
+```
 
-* REQUEST
-* RESPONSE
-* ERROR
-* PING
-* PONG
+### REQUEST
 
-## Design Goals
+Sent by clients.
 
-* Simple to inspect
-* Easy to benchmark
-* Explicit request correlation
-* Predictable failure behavior
-* Protocol transparency
+```txt
+Client -> Server
+```
 
-Argus intentionally avoids introducing a custom serializer in v1 so that protocol behavior remains the primary focus.
+### RESPONSE
+
+Sent by servers.
+
+```txt
+Server -> Client
+```
+
+### ERROR
+
+Represents structured protocol failures.
+
+```txt
+Server -> Client
+```
+
+### PING
+
+Heartbeat request.
+
+```txt
+Client -> Server
+```
+
+### PONG
+
+Heartbeat response.
+
+```txt
+Server -> Client
+```
+
+## Message IDs
+
+Every request receives a message ID.
+
+Responses reuse the same message ID.
+
+This allows concurrent requests to be correlated correctly.
+
+## Methods
+
+Methods are UTF-8 strings.
+
+Examples:
+
+```txt
+user.get
+system.ping
+math.add
+```
+
+## Payloads
+
+Argus v1 uses JSON payload serialization.
+
+Examples:
+
+```json
+{
+  "id": 1
+}
+```
+
+Custom binary serialization is intentionally excluded from v1.
+
+## Error Model
+
+Errors are transmitted as structured payloads.
+
+Example:
+
+```json
+{
+  "code": "ARGUS_METHOD_NOT_FOUND",
+  "message": "Method not found"
+}
+```
+
+## Future Expansion
+
+Possible future protocol extensions:
+
+* Streaming
+* Pub/Sub
+* Service discovery
+* Binary serializers
+* Compression
+* Load balancing
+* Circuit breakers

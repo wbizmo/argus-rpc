@@ -7,11 +7,13 @@ import {
   encodeFrame
 } from "../protocol";
 import { parsePayload, serializePayload } from "../protocol/json";
+import { withRetry, type RetryOptions } from "./retry";
 
 export interface ArgusClientOptions {
   host?: string;
   port: number;
   timeoutMs?: number;
+  retry?: RetryOptions;
 }
 
 interface PendingRequest {
@@ -24,6 +26,7 @@ export class ArgusClient {
   private readonly host: string;
   private readonly port: number;
   private readonly timeoutMs: number;
+  private readonly retry?: RetryOptions;
   private socket: net.Socket | null = null;
   private pendingBuffer = Buffer.alloc(0);
   private nextMessageId = 1;
@@ -33,6 +36,7 @@ export class ArgusClient {
     this.host = options.host ?? "127.0.0.1";
     this.port = options.port;
     this.timeoutMs = options.timeoutMs ?? 3000;
+    this.retry = options.retry;
   }
 
   async connect(): Promise<void> {
@@ -91,6 +95,23 @@ export class ArgusClient {
   }
 
   async call<TResponse = unknown>(
+    method: string,
+    payload?: unknown,
+    timeoutMs = this.timeoutMs
+  ): Promise<TResponse> {
+    if (!this.retry) {
+      return this.callOnce<TResponse>(method, payload, timeoutMs);
+    }
+
+    return withRetry(
+      async () => {
+        return this.callOnce<TResponse>(method, payload, timeoutMs);
+      },
+      this.retry
+    );
+  }
+
+  async callOnce<TResponse = unknown>(
     method: string,
     payload?: unknown,
     timeoutMs = this.timeoutMs

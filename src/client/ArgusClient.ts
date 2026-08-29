@@ -9,7 +9,9 @@ import {
   serializePayload,
   type ArgusProtocolLimits
 } from "../protocol";
+import { ArgusStatus } from "../rpc";
 import { ArgusFrameStreamDecoder, SocketWriter } from "../transport";
+import { MessageIdAllocator } from "./message-id";
 import { withRetry, type RetryOptions } from "./retry";
 
 export interface ArgusClientOptions {
@@ -34,11 +36,11 @@ export class ArgusClient {
   private readonly retry?: RetryOptions;
   private readonly protocolLimits?: Partial<ArgusProtocolLimits>;
   private readonly maxQueuedWriteBytes?: number;
+  private readonly messageIds = new MessageIdAllocator();
   private socket: net.Socket | null = null;
   private writer: SocketWriter | null = null;
   private decoder: ArgusFrameStreamDecoder | null = null;
   private connectPromise: Promise<void> | null = null;
-  private nextMessageId = 1;
   private readonly pending = new Map<number, PendingRequest>();
 
   constructor(options: ArgusClientOptions) {
@@ -51,12 +53,8 @@ export class ArgusClient {
   }
 
   async connect(): Promise<void> {
-    if (this.socket && !this.socket.destroyed && !this.socket.connecting) {
-      return;
-    }
-    if (this.connectPromise) {
-      return this.connectPromise;
-    }
+    if (this.socket && !this.socket.destroyed && !this.socket.connecting) return;
+    if (this.connectPromise) return this.connectPromise;
 
     this.connectPromise = this.openSocket();
     try {
@@ -71,9 +69,7 @@ export class ArgusClient {
     payload?: unknown,
     timeoutMs = this.timeoutMs
   ): Promise<TResponse> {
-    if (!this.retry) {
-      return this.callOnce<TResponse>(method, payload, timeoutMs);
-    }
+    if (!this.retry) return this.callOnce<TResponse>(method, payload, timeoutMs);
 
     return withRetry(
       async () => this.callOnce<TResponse>(method, payload, timeoutMs),
@@ -89,7 +85,7 @@ export class ArgusClient {
     await this.connect();
 
     const writer = this.getWriter();
-    const messageId = this.nextMessageId++;
+    const messageId = this.allocateMessageId();
     const encoded = encodeFrame(createFrame({
       type: ArgusMessageType.REQUEST,
       messageId,
@@ -127,7 +123,7 @@ export class ArgusClient {
     await this.connect();
 
     const writer = this.getWriter();
-    const messageId = this.nextMessageId++;
+    const messageId = this.allocateMessageId();
     const encoded = encodeFrame(createFrame({
       type: ArgusMessageType.PING,
       messageId,
@@ -144,11 +140,7 @@ export class ArgusClient {
         }));
       }, timeoutMs);
 
-      this.pending.set(messageId, {
-        resolve: () => resolve(true),
-        reject,
-        timer
-      });
+      this.pending.set(messageId, { resolve: () => resolve(true), reject, timer });
 
       void writer.write(encoded).catch((error: Error) => {
         const pending = this.pending.get(messageId);
@@ -173,9 +165,7 @@ export class ArgusClient {
     this.writer?.close();
     this.writer = null;
 
-    if (!socket || socket.destroyed) {
-      return;
-    }
+    if (!socket || socket.destroyed) return;
 
     await new Promise<void>((resolve) => {
       socket.once("close", () => resolve());
@@ -187,9 +177,7 @@ export class ArgusClient {
   private async openSocket(): Promise<void> {
     const socket = net.createConnection({ host: this.host, port: this.port });
     const decoder = new ArgusFrameStreamDecoder(this.protocolLimits);
-    const writer = new SocketWriter(socket, {
-      maxQueuedBytes: this.maxQueuedWriteBytes
-    });
+    const writer = new SocketWriter(socket, { maxQueuedBytes: this.maxQueuedWriteBytes });
 
     this.socket = socket;
     this.decoder = decoder;
@@ -209,9 +197,7 @@ export class ArgusClient {
       }
     });
 
-    socket.on("error", (error) => {
-      this.rejectAll(error);
-    });
+    socket.on("error", (error) => this.rejectAll(error));
 
     socket.on("close", () => {
       writer.close();
@@ -263,18 +249,29 @@ export class ArgusClient {
       const errorPayload = payload as {
         code?: string;
         message?: string;
+        status?: string;
+        retryable?: boolean;
         details?: unknown;
       } | undefined;
+      const status = Object.values(ArgusStatus).includes(errorPayload?.status as ArgusStatus)
+        ? errorPayload?.status as ArgusStatus
+        : ArgusStatus.UNKNOWN;
 
       pending.reject(new ArgusError({
         code: errorPayload?.code ?? "ARGUS_REMOTE_ERROR",
         message: errorPayload?.message ?? "Argus remote error",
+        status,
+        retryable: errorPayload?.retryable,
         details: errorPayload?.details
       }));
       return;
     }
 
     pending.resolve(payload);
+  }
+
+  private allocateMessageId(): number {
+    return this.messageIds.allocate(new Set(this.pending.keys()));
   }
 
   private getWriter(): SocketWriter {

@@ -1,16 +1,20 @@
 import { getFrameSize, validateFrame } from "./frame";
+import type { ArgusProtocolLimits } from "./limits";
 import {
   ARGUS_MAGIC,
   ARGUS_VERSION,
   ArgusFrame
 } from "./types";
 
-export function encodeFrame(frame: ArgusFrame): Buffer {
-  validateFrame(frame);
+export function encodeFrame(
+  frame: ArgusFrame,
+  limits?: Partial<ArgusProtocolLimits>
+): Buffer {
+  validateFrame(frame, limits);
 
   const methodBuffer = Buffer.from(frame.method, "utf8");
   const frameSize = getFrameSize(frame);
-  const buffer = Buffer.alloc(frameSize);
+  const buffer = Buffer.allocUnsafe(frameSize);
 
   let offset = 0;
 

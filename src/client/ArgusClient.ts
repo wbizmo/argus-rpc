@@ -2,11 +2,14 @@ import net from "node:net";
 import { ArgusError } from "../errors";
 import {
   ArgusMessageType,
+  assertFrameAllowedFromPeer,
   createFrame,
-  decodeFrames,
-  encodeFrame
+  encodeFrame,
+  parsePayload,
+  serializePayload,
+  type ArgusProtocolLimits
 } from "../protocol";
-import { parsePayload, serializePayload } from "../protocol/json";
+import { ArgusFrameStreamDecoder, SocketWriter } from "../transport";
 import { withRetry, type RetryOptions } from "./retry";
 
 export interface ArgusClientOptions {
@@ -14,6 +17,8 @@ export interface ArgusClientOptions {
   port: number;
   timeoutMs?: number;
   retry?: RetryOptions;
+  protocolLimits?: Partial<ArgusProtocolLimits>;
+  maxQueuedWriteBytes?: number;
 }
 
 interface PendingRequest {
@@ -27,8 +32,12 @@ export class ArgusClient {
   private readonly port: number;
   private readonly timeoutMs: number;
   private readonly retry?: RetryOptions;
+  private readonly protocolLimits?: Partial<ArgusProtocolLimits>;
+  private readonly maxQueuedWriteBytes?: number;
   private socket: net.Socket | null = null;
-  private pendingBuffer = Buffer.alloc(0);
+  private writer: SocketWriter | null = null;
+  private decoder: ArgusFrameStreamDecoder | null = null;
+  private connectPromise: Promise<void> | null = null;
   private nextMessageId = 1;
   private readonly pending = new Map<number, PendingRequest>();
 
@@ -37,61 +46,24 @@ export class ArgusClient {
     this.port = options.port;
     this.timeoutMs = options.timeoutMs ?? 3000;
     this.retry = options.retry;
+    this.protocolLimits = options.protocolLimits;
+    this.maxQueuedWriteBytes = options.maxQueuedWriteBytes;
   }
 
   async connect(): Promise<void> {
-    if (this.socket && !this.socket.destroyed) {
+    if (this.socket && !this.socket.destroyed && !this.socket.connecting) {
       return;
     }
+    if (this.connectPromise) {
+      return this.connectPromise;
+    }
 
-    this.socket = net.createConnection({
-      host: this.host,
-      port: this.port
-    });
-
-    this.socket.on("data", (chunk: Buffer) => {
-      this.handleData(chunk);
-    });
-
-    this.socket.on("error", (error) => {
-      this.rejectAll(error);
-    });
-
-    this.socket.on("close", () => {
-      this.rejectAll(
-        new ArgusError({
-          code: "ARGUS_CONNECTION_CLOSED",
-          message: "Argus connection closed"
-        })
-      );
-    });
-
-    await new Promise<void>((resolve, reject) => {
-      const socket = this.socket;
-
-      if (!socket) {
-        reject(
-          new ArgusError({
-            code: "ARGUS_SOCKET_NOT_CREATED",
-            message: "Argus socket could not be created"
-          })
-        );
-        return;
-      }
-
-      const onConnect = () => {
-        socket.off("error", onError);
-        resolve();
-      };
-
-      const onError = (error: Error) => {
-        socket.off("connect", onConnect);
-        reject(error);
-      };
-
-      socket.once("connect", onConnect);
-      socket.once("error", onError);
-    });
+    this.connectPromise = this.openSocket();
+    try {
+      await this.connectPromise;
+    } finally {
+      this.connectPromise = null;
+    }
   }
 
   async call<TResponse = unknown>(
@@ -104,9 +76,7 @@ export class ArgusClient {
     }
 
     return withRetry(
-      async () => {
-        return this.callOnce<TResponse>(method, payload, timeoutMs);
-      },
+      async () => this.callOnce<TResponse>(method, payload, timeoutMs),
       this.retry
     );
   }
@@ -118,32 +88,23 @@ export class ArgusClient {
   ): Promise<TResponse> {
     await this.connect();
 
-    const socket = this.getSocket();
+    const writer = this.getWriter();
     const messageId = this.nextMessageId++;
-
-    const frame = createFrame({
+    const encoded = encodeFrame(createFrame({
       type: ArgusMessageType.REQUEST,
       messageId,
       method,
       payload: serializePayload(payload)
-    });
-
-    const encoded = encodeFrame(frame);
+    }), this.protocolLimits);
 
     return new Promise<TResponse>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(messageId);
-        reject(
-          new ArgusError({
-            code: "ARGUS_REQUEST_TIMEOUT",
-            message: `Argus request timed out after ${timeoutMs}ms`,
-            details: {
-              method,
-              messageId,
-              timeoutMs
-            }
-          })
-        );
+        reject(new ArgusError({
+          code: "ARGUS_REQUEST_TIMEOUT",
+          message: `Argus request timed out after ${timeoutMs}ms`,
+          details: { method, messageId, timeoutMs }
+        }));
       }, timeoutMs);
 
       this.pending.set(messageId, {
@@ -152,32 +113,35 @@ export class ArgusClient {
         timer
       });
 
-      socket.write(encoded);
+      void writer.write(encoded).catch((error: Error) => {
+        const pending = this.pending.get(messageId);
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        this.pending.delete(messageId);
+        pending.reject(error);
+      });
     });
   }
 
   async ping(timeoutMs = this.timeoutMs): Promise<boolean> {
     await this.connect();
 
-    const socket = this.getSocket();
+    const writer = this.getWriter();
     const messageId = this.nextMessageId++;
-
-    const frame = createFrame({
+    const encoded = encodeFrame(createFrame({
       type: ArgusMessageType.PING,
       messageId,
       method: "",
       payload: null
-    });
+    }), this.protocolLimits);
 
     return new Promise<boolean>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(messageId);
-        reject(
-          new ArgusError({
-            code: "ARGUS_PING_TIMEOUT",
-            message: `Argus ping timed out after ${timeoutMs}ms`
-          })
-        );
+        reject(new ArgusError({
+          code: "ARGUS_PING_TIMEOUT",
+          message: `Argus ping timed out after ${timeoutMs}ms`
+        }));
       }, timeoutMs);
 
       this.pending.set(messageId, {
@@ -186,24 +150,32 @@ export class ArgusClient {
         timer
       });
 
-      socket.write(encodeFrame(frame));
+      void writer.write(encoded).catch((error: Error) => {
+        const pending = this.pending.get(messageId);
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        this.pending.delete(messageId);
+        pending.reject(error);
+      });
     });
   }
 
   async close(): Promise<void> {
-    this.rejectAll(
-      new ArgusError({
-        code: "ARGUS_CLIENT_CLOSED",
-        message: "Argus client closed"
-      })
-    );
-
-    if (!this.socket) {
-      return;
-    }
+    this.rejectAll(new ArgusError({
+      code: "ARGUS_CLIENT_CLOSED",
+      message: "Argus client closed"
+    }));
 
     const socket = this.socket;
     this.socket = null;
+    this.decoder?.reset();
+    this.decoder = null;
+    this.writer?.close();
+    this.writer = null;
+
+    if (!socket || socket.destroyed) {
+      return;
+    }
 
     await new Promise<void>((resolve) => {
       socket.once("close", () => resolve());
@@ -212,56 +184,107 @@ export class ArgusClient {
     });
   }
 
-  private handleData(chunk: Buffer): void {
-    const incoming = Buffer.from(chunk);
-    this.pendingBuffer = Buffer.concat([this.pendingBuffer, incoming]);
+  private async openSocket(): Promise<void> {
+    const socket = net.createConnection({ host: this.host, port: this.port });
+    const decoder = new ArgusFrameStreamDecoder(this.protocolLimits);
+    const writer = new SocketWriter(socket, {
+      maxQueuedBytes: this.maxQueuedWriteBytes
+    });
 
-    const result = decodeFrames(this.pendingBuffer);
-    this.pendingBuffer = Buffer.from(result.remaining);
+    this.socket = socket;
+    this.decoder = decoder;
+    this.writer = writer;
 
-    for (const frame of result.frames) {
-      const pending = this.pending.get(frame.messageId);
-
-      if (!pending) {
-        continue;
+    socket.on("data", (chunk: Buffer) => {
+      try {
+        const frames = decoder.push(chunk);
+        for (const frame of frames) {
+          assertFrameAllowedFromPeer("client", frame);
+          this.handleFrame(frame);
+        }
+      } catch (error) {
+        const argusError = ArgusError.fromUnknown(error, "ARGUS_INVALID_SERVER_FRAME");
+        this.rejectAll(argusError);
+        socket.destroy(argusError);
       }
+    });
 
-      clearTimeout(pending.timer);
-      this.pending.delete(frame.messageId);
+    socket.on("error", (error) => {
+      this.rejectAll(error);
+    });
 
-      if (frame.type === ArgusMessageType.PONG) {
-        pending.resolve(true);
-        continue;
+    socket.on("close", () => {
+      writer.close();
+      decoder.reset();
+      this.rejectAll(new ArgusError({
+        code: "ARGUS_CONNECTION_CLOSED",
+        message: "Argus connection closed"
+      }));
+      if (this.socket === socket) {
+        this.socket = null;
+        this.writer = null;
+        this.decoder = null;
       }
+    });
 
-      const payload = parsePayload(frame.payload);
-
-      if (frame.type === ArgusMessageType.ERROR) {
-        const errorPayload = payload as { code?: string; message?: string; details?: unknown } | undefined;
-
-        pending.reject(
-          new ArgusError({
-            code: errorPayload?.code ?? "ARGUS_REMOTE_ERROR",
-            message: errorPayload?.message ?? "Argus remote error",
-            details: errorPayload?.details
-          })
-        );
-        continue;
-      }
-
-      pending.resolve(payload);
-    }
+    await new Promise<void>((resolve, reject) => {
+      const onConnect = () => {
+        socket.off("error", onConnectError);
+        resolve();
+      };
+      const onConnectError = (error: Error) => {
+        socket.off("connect", onConnect);
+        reject(error);
+      };
+      socket.once("connect", onConnect);
+      socket.once("error", onConnectError);
+    });
   }
 
-  private getSocket(): net.Socket {
-    if (!this.socket || this.socket.destroyed) {
+  private handleFrame(frame: {
+    type: ArgusMessageType;
+    messageId: number;
+    payload: Buffer;
+  }): void {
+    const pending = this.pending.get(frame.messageId);
+    if (!pending) return;
+
+    clearTimeout(pending.timer);
+    this.pending.delete(frame.messageId);
+
+    if (frame.type === ArgusMessageType.PONG) {
+      pending.resolve(true);
+      return;
+    }
+
+    const payload = parsePayload(frame.payload);
+
+    if (frame.type === ArgusMessageType.ERROR) {
+      const errorPayload = payload as {
+        code?: string;
+        message?: string;
+        details?: unknown;
+      } | undefined;
+
+      pending.reject(new ArgusError({
+        code: errorPayload?.code ?? "ARGUS_REMOTE_ERROR",
+        message: errorPayload?.message ?? "Argus remote error",
+        details: errorPayload?.details
+      }));
+      return;
+    }
+
+    pending.resolve(payload);
+  }
+
+  private getWriter(): SocketWriter {
+    if (!this.socket || this.socket.destroyed || !this.writer) {
       throw new ArgusError({
         code: "ARGUS_CLIENT_NOT_CONNECTED",
         message: "Argus client is not connected"
       });
     }
-
-    return this.socket;
+    return this.writer;
   }
 
   private rejectAll(error: Error): void {

@@ -11,6 +11,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: normalize-argus-lockfile
+  cancel-in-progress: true
+
 jobs:
   normalize:
     if: github.actor != 'github-actions[bot]'

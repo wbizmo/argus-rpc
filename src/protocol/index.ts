@@ -5,3 +5,4 @@ export * from "./frame";
 export * from "./encoder";
 export * from "./decoder";
 export * from "./json";
+export * from "./codecs";

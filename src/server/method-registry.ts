@@ -1,4 +1,9 @@
-export type ArgusMethodHandler = (payload: unknown) => Promise<unknown> | unknown;
+import type { ArgusCallContext } from "../rpc";
+
+export type ArgusMethodHandler = (
+  payload: unknown,
+  context?: ArgusCallContext
+) => Promise<unknown> | unknown;
 
 export class MethodRegistry {
   private readonly handlers = new Map<string, ArgusMethodHandler>();
@@ -19,14 +24,18 @@ export class MethodRegistry {
     return this.handlers.has(method);
   }
 
-  async execute(method: string, payload: unknown): Promise<unknown> {
+  async execute(
+    method: string,
+    payload: unknown,
+    context?: ArgusCallContext
+  ): Promise<unknown> {
     const handler = this.handlers.get(method);
 
     if (!handler) {
       throw new Error("ARGUS_METHOD_NOT_FOUND");
     }
 
-    return handler(payload);
+    return handler(payload, context);
   }
 
   list(): string[] {

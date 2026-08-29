@@ -1,19 +1,35 @@
 {
   "name": "argus-rpc",
-  "version": "1.0.0",
-  "description": "A lightweight TypeScript-native RPC protocol over raw TCP built for learning, experimentation, benchmarking, and infrastructure research.",
+  "version": "2.0.0",
+  "description": "A compact TypeScript RPC runtime over persistent TCP with binary framing, multiplexing, resilience, and observability primitives.",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "LICENSE"
   ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "build": "tsup src/index.ts --format cjs,esm --dts",
-    "bench": "tsx benchmarks/argus-vs-rest.ts"
+    "verify": "npm run typecheck && npm test && npm run build",
+    "bench": "tsx benchmarks/argus-vs-rest.ts",
+    "prepack": "npm run verify"
   },
   "keywords": [
     "rpc",
@@ -21,10 +37,27 @@
     "typescript",
     "protocol",
     "binary-framing",
+    "multiplexing",
     "networking",
     "distributed-systems",
-    "infrastructure"
+    "infrastructure",
+    "observability"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wbizmo/argus-rpc.git"
+  },
+  "bugs": {
+    "url": "https://github.com/wbizmo/argus-rpc/issues"
+  },
+  "homepage": "https://github.com/wbizmo/argus-rpc#readme",
   "author": "Williams Ashibuogwu (wbizmo)",
-  "license": "SEE LICENSE IN LICENSE"
+  "license": "SEE LICENSE IN LICENSE",
+  "devDependencies": {
+    "@types/node": "^25.9.3",
+    "tsup": "^8.5.1",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
+  }
 }

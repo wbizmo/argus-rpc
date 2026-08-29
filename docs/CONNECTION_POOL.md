@@ -1,88 +1,23 @@
-# Connection Pool
+# Connection pooling
 
-Argus includes a lightweight TCP connection pool for reusing client connections.
+Argus v2 treats a TCP connection as a multiplexed channel, not as a single-use request slot.
 
-The pool is designed for experimentation, benchmarking, and infrastructure learning.
+## Selection model
 
-## Purpose
+`ArgusConnectionPool` chooses the healthy channel with the fewest in-flight calls. Each channel accepts up to `maxConcurrentPerConnection` active RPCs. A new channel is created only when existing channels are saturated and the configured `size` has not been reached.
 
-Creating a new TCP connection for every request adds overhead.
+If every channel is saturated, callers wait for capacity with a bounded `acquireTimeoutMs`; the pool does not immediately fail simply because another RPC is using each socket.
 
-A connection pool allows multiple calls to reuse existing TCP clients.
+## Failure handling
 
-## Responsibilities
+Only transport-class failures retire a channel. Application errors such as `INVALID_ARGUMENT` or `FAILED_PRECONDITION` leave the underlying TCP connection healthy and reusable.
 
-The pool is responsible for:
+A retired channel is removed from the pool before replacement decisions are made. This prevents the v1 failure mode where dead entries remained in the array, permanently consumed the configured size, and eventually caused `ARGUS_POOL_EXHAUSTED` despite having no usable connections.
 
-* Creating clients lazily
-* Reusing healthy clients
-* Tracking in-use connections
-* Closing unhealthy clients
-* Reporting pool stats
-* Enforcing pool size limits
+## Circuit breaker
 
-## Basic Usage
+Pools use a circuit breaker by default. Retryable transport failures count toward the breaker; normal application failures do not. The breaker transitions through `CLOSED`, `OPEN`, and `HALF_OPEN` and bounds probe traffic during recovery. Set `circuitBreaker: false` when an external resilience layer owns this policy.
 
-```ts
-import { ArgusConnectionPool } from "argus-rpc";
+## Useful stats
 
-const pool = new ArgusConnectionPool({
-  host: "127.0.0.1",
-  port: 7000,
-  size: 4
-});
-
-const response = await pool.call("system.ping");
-
-await pool.close();
-```
-
-## Pool Stats
-
-The pool exposes:
-
-```ts
-pool.stats()
-```
-
-Example result:
-
-```ts
-{
-  size: 4,
-  created: 1,
-  available: 1,
-  inUse: 0,
-  unhealthy: 0
-}
-```
-
-## Health Behavior
-
-When a pooled call succeeds, the connection is considered healthy.
-
-When a pooled call fails, the pool marks the connection unhealthy and closes it.
-
-Unhealthy connections are not reused.
-
-## Pool Exhaustion
-
-If all connections are in use and the pool cannot create another connection, it throws:
-
-```txt
-ARGUS_POOL_EXHAUSTED
-```
-
-## Design Scope
-
-The v1 pool is intentionally simple.
-
-It does not implement:
-
-* Queueing
-* Priority scheduling
-* Circuit breaking
-* Load balancing
-* Service discovery
-
-Those are intentionally reserved for future versions.
+`pool.stats()` reports configured size, channels created, available and in-use channel counts, unhealthy entries, aggregate in-flight calls, and acquisition waiters.

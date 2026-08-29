@@ -8,6 +8,7 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
+    "forceConsistentCasingInFileNames": true,
     "types": ["node"],
     "outDir": "./dist",
     "ignoreDeprecations": "6.0"

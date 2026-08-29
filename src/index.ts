@@ -1,17 +1,18 @@
 /**
  * Argus RPC
  *
- * A lightweight TypeScript-native RPC protocol
- * built for learning, experimentation,
- * benchmarking, and infrastructure research.
+ * A compact TypeScript RPC runtime over persistent TCP.
  *
  * Author:
  * Williams Ashibuogwu (wbizmo)
  */
 
-export const ARGUS_PACKAGE_VERSION = "0.0.0";
+export const ARGUS_PACKAGE_VERSION = "2.0.0";
 
 export * from "./protocol";
+export * from "./transport";
+export * from "./rpc";
+export * from "./observability";
 export * from "./server";
 export * from "./client";
 export * from "./errors";

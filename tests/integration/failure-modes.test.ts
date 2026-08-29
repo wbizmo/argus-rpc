@@ -6,6 +6,7 @@ import {
   ArgusError,
   ArgusMessageType,
   ArgusServer,
+  ArgusStatus,
   createFrame,
   decodeFrame,
   encodeFrame
@@ -63,7 +64,7 @@ describe("Argus failure modes", () => {
     }
   });
 
-  it("times out slow requests", async () => {
+  it("turns slow requests into distributed deadline failures", async () => {
     server = new ArgusServer();
 
     server.method("slow.method", async () => {
@@ -79,7 +80,8 @@ describe("Argus failure modes", () => {
       throw new Error("expected call to timeout");
     } catch (error) {
       expect(error).toBeInstanceOf(ArgusError);
-      expect((error as ArgusError).code).toBe("ARGUS_REQUEST_TIMEOUT");
+      expect((error as ArgusError).code).toBe("ARGUS_DEADLINE_EXCEEDED");
+      expect((error as ArgusError).status).toBe(ArgusStatus.DEADLINE_EXCEEDED);
     }
   });
 

@@ -1,124 +1,83 @@
-# Benchmarks
+# Argus RPC Benchmarks
 
-Argus includes a local benchmark suite that compares:
+Argus ships a reproducible local benchmark harness for comparing the Argus TCP request/response path with a Node HTTP/JSON baseline. It is a diagnostic tool, not a universal performance claim.
 
-* Argus TCP binary RPC
-* Node HTTP JSON
-
-The goal is not to claim universal superiority over HTTP or established RPC systems. The benchmark exists to support learning, experimentation, and infrastructure research.
-
-Performance depends on machine resources, Node.js version, CPU load, operating system, networking conditions, and runtime configuration.
-
-## Running Benchmarks
+## Run
 
 ```bash
 npm run bench
 ```
 
-You can customize request count and concurrency:
+Configuration is environment-driven:
 
 ```bash
-ARGUS_BENCH_REQUESTS=5000 ARGUS_BENCH_CONCURRENCY=100 npm run bench
+ARGUS_BENCH_REQUESTS=10000 \
+ARGUS_BENCH_CONCURRENCY=128 \
+ARGUS_BENCH_WARMUP=500 \
+ARGUS_BENCH_JSON=1 \
+npm run bench
 ```
 
-## Metrics
+| Variable | Default | Meaning |
+| --- | ---: | --- |
+| `ARGUS_BENCH_REQUESTS` | `1000` | measured requests per transport |
+| `ARGUS_BENCH_CONCURRENCY` | `50` | concurrent workers / maximum HTTP sockets |
+| `ARGUS_BENCH_WARMUP` | `min(100, requests)` | unmeasured warmup requests |
+| `ARGUS_BENCH_JSON` | unset | emit a machine-readable `RESULT_JSON=` record when set to `1` |
 
-The benchmark reports:
+Invalid or non-positive numeric values fall back to the defaults.
 
-* Total requests
-* Completed requests
-* Failed requests
-* Total duration
-* Average latency
-* P95 latency
-* Requests per second
+## Reported measurements
 
-## What Is Being Compared?
+Each transport reports:
 
-### Argus TCP Binary RPC
+- total, completed and failed requests;
+- error rate;
+- total measured duration;
+- average latency;
+- p50, p90, p95 and p99 latency;
+- maximum observed latency;
+- requests per second.
 
-Argus uses:
+The runner also records the Node version, operating system, architecture, CPU model and logical CPU count. These environment fields are mandatory context for any published result.
 
-* A raw TCP connection
-* Explicit binary framing
-* Message IDs
-* Request/response correlation
-* JSON payload serialization for v1
+## Comparison shape
 
-### Node HTTP JSON
+### Argus
 
-The HTTP baseline uses:
+The benchmark uses one persistent `ArgusClient` connection and multiplexes concurrent RPCs across it. The server echoes a small JSON-compatible payload through the normal Argus request envelope and response path.
 
-* Node's built-in HTTP server
-* POST requests
-* JSON request body
-* JSON response body
+### HTTP baseline
 
-## Why JSON Still Exists in v1
+The baseline uses Node's built-in HTTP implementation with a keep-alive agent and a maximum socket count equal to benchmark concurrency. Requests are POSTed to a local JSON echo endpoint. Keep-alive is intentional so the comparison does not artificially penalize HTTP with a new TCP connection for every request.
 
-Argus v1 intentionally does not implement a custom binary serializer.
+The benchmark therefore compares two real local request paths, but it still does **not** isolate every variable. Argus framing, request envelopes, HTTP parsing, header processing, scheduling and implementation details differ.
 
-The benchmark focuses on transport and framing behavior rather than serialization design.
+## Publishing results
 
-Custom binary serialization is intentionally reserved for future versions.
+Do not paste a single throughput number into the README and present it as a property of the protocol. For a publishable benchmark record, include at least:
 
-## Example Output
+1. Argus commit SHA and release version;
+2. Node version;
+3. OS and architecture;
+4. CPU model and logical CPU count;
+5. request count, concurrency and warmup size;
+6. all latency percentiles, throughput and error rate;
+7. whether the machine was otherwise idle;
+8. multiple runs, with the median run preferred over the best run.
 
-```txt
-Argus Benchmark Suite
-=====================
-Requests: 1000
-Concurrency: 50
+For deeper work, sweep several dimensions rather than tuning one favorite scenario:
 
-Argus TCP binary RPC
---------------------
-Total requests:      1000
-Completed requests:  1000
-Failed requests:     0
-Total duration:      120.00ms
-Average latency:     4.500ms
-P95 latency:         9.200ms
-Requests/second:     8333.33
+- concurrency: `1`, `8`, `32`, `128`, `512`;
+- request count: `10k`, `100k`, and larger only when the host is stable;
+- payload sizes: empty, `64 B`, `1 KiB`, `16 KiB`, `1 MiB`;
+- one multiplexed connection versus a configured connection pool;
+- supported Node versions.
 
-Node HTTP JSON
---------------
-Total requests:      1000
-Completed requests:  1000
-Failed requests:     0
-Total duration:      300.00ms
-Average latency:     12.300ms
-P95 latency:         28.000ms
-Requests/second:     3333.33
-```
+Store raw machine-readable output with the benchmark date and commit SHA if results are going to be referenced from documentation.
 
-The numbers above are examples only. Real results should be generated locally.
+## Interpreting results
 
-## Interpreting Results
+A lower local latency or higher local request rate can explain a transport behavior; it does not prove that Argus should replace HTTP, gRPC, or another production RPC stack. Network topology, TLS, payload shape, server work, backpressure, retries, deadlines, observability and failure behavior can dominate real systems.
 
-Argus may perform well in local benchmarks because it avoids parts of the HTTP request lifecycle and uses persistent TCP communication.
-
-However, this does not mean Argus should replace HTTP or gRPC.
-
-Argus is a protocol engineering project designed to demonstrate:
-
-* Framing
-* Request correlation
-* TCP lifecycle management
-* Heartbeats
-* Retry behavior
-* Pooling
-* Failure detection
-* Benchmark methodology
-
-## Research Notes
-
-Benchmarks should be interpreted as local measurements, not universal claims.
-
-For serious performance analysis, results should be collected across:
-
-* Multiple request counts
-* Multiple concurrency levels
-* Multiple Node.js versions
-* Multiple machines
-* Warm and cold runs
-* CPU and memory profiles
+Argus treats benchmarking as part of protocol engineering: reproducible setup, explicit assumptions, tail latency, failures and environment metadata matter more than a vanity multiplier.

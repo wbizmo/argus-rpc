@@ -6,12 +6,15 @@ import {
   assertFrameAllowedFromPeer,
   createFrame,
   encodeFrame,
-  parsePayload,
   serializePayload,
   type ArgusFrame,
   type ArgusProtocolLimits
 } from "../protocol";
-import type { ArgusCallContext } from "../rpc";
+import {
+  ArgusStatus,
+  decodeRequestEnvelope,
+  type ArgusCallContext
+} from "../rpc";
 import { ArgusFrameStreamDecoder, SocketWriter } from "../transport";
 import { ConcurrencyLimiter } from "./concurrency-limiter";
 import { MethodRegistry, type ArgusMethodHandler } from "./method-registry";
@@ -71,57 +74,40 @@ export class ArgusServer {
       });
     }
 
-    this.server = net.createServer((socket) => {
-      this.handleSocket(socket);
-    });
+    this.server = net.createServer((socket) => this.handleSocket(socket));
 
     await new Promise<void>((resolve, reject) => {
       const onError = (error: Error) => {
         this.server?.off("listening", onListening);
         reject(error);
       };
-
       const onListening = () => {
         this.server?.off("error", onError);
         resolve();
       };
-
       this.server?.once("error", onError);
       this.server?.once("listening", onListening);
       this.server?.listen(port, host);
     });
 
     const address = this.server.address();
-
     if (!address || typeof address === "string") {
       throw new ArgusError({
         code: "ARGUS_INVALID_SERVER_ADDRESS",
         message: "Argus server could not resolve a valid listening address"
       });
     }
-
     return address.port;
   }
 
   async close(): Promise<void> {
     this.connections.destroyAll();
-
-    if (!this.server) {
-      return;
-    }
+    if (!this.server) return;
 
     const server = this.server;
     this.server = null;
-
     await new Promise<void>((resolve, reject) => {
-      server.close((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-
-        resolve();
-      });
+      server.close((error) => error ? reject(error) : resolve());
     });
   }
 
@@ -131,8 +117,17 @@ export class ArgusServer {
     const writer = new SocketWriter(socket, {
       maxQueuedBytes: this.options.maxQueuedWriteBytes
     });
+    const calls = new Map<number, AbortController>();
 
     socket.once("close", () => {
+      for (const controller of calls.values()) {
+        controller.abort(new ArgusError({
+          code: "ARGUS_CONNECTION_CLOSED",
+          message: "Connection closed while RPC was active",
+          status: ArgusStatus.UNAVAILABLE
+        }));
+      }
+      calls.clear();
       decoder.reset();
       writer.close();
     });
@@ -142,14 +137,11 @@ export class ArgusServer {
         const frames = decoder.push(chunk);
         for (const frame of frames) {
           assertFrameAllowedFromPeer("server", frame);
-          void this.handleFrame(socket, writer, frame).catch(() => {
-            socket.destroy();
-          });
+          void this.handleFrame(socket, writer, calls, frame).catch(() => socket.destroy());
         }
       } catch (error) {
         const argusError = ArgusError.fromUnknown(error, "ARGUS_INVALID_FRAME");
-        void this.writeError(writer, 0, "", argusError)
-          .finally(() => socket.destroy());
+        void this.writeError(writer, 0, "", argusError).finally(() => socket.destroy());
       }
     });
   }
@@ -157,6 +149,7 @@ export class ArgusServer {
   private async handleFrame(
     socket: net.Socket,
     writer: SocketWriter,
+    calls: Map<number, AbortController>,
     frame: ArgusFrame
   ): Promise<void> {
     if (frame.type === ArgusMessageType.PING) {
@@ -169,33 +162,80 @@ export class ArgusServer {
       return;
     }
 
+    if (frame.type === ArgusMessageType.CANCEL) {
+      calls.get(frame.messageId)?.abort(new ArgusError({
+        code: "ARGUS_CALL_CANCELLED",
+        message: "Argus call cancelled by peer",
+        status: ArgusStatus.CANCELLED
+      }));
+      return;
+    }
+
+    if (calls.has(frame.messageId)) {
+      await this.writeError(writer, frame.messageId, frame.method, new ArgusError({
+        code: "ARGUS_DUPLICATE_MESSAGE_ID",
+        message: "A call with this message id is already active",
+        status: ArgusStatus.INVALID_ARGUMENT
+      }));
+      return;
+    }
+
+    const controller = new AbortController();
+    calls.set(frame.messageId, controller);
+
     try {
       await this.limiter.run(async () => {
-        const controller = new AbortController();
+        const request = decodeRequestEnvelope(frame.payload);
+        let deadlineTimer: NodeJS.Timeout | undefined;
+
+        if (request.deadlineUnixMs !== undefined) {
+          const remaining = request.deadlineUnixMs - Date.now();
+          if (remaining <= 0) {
+            throw new ArgusError({
+              code: "ARGUS_DEADLINE_EXCEEDED",
+              message: "Argus request deadline expired before execution",
+              status: ArgusStatus.DEADLINE_EXCEEDED
+            });
+          }
+          deadlineTimer = setTimeout(() => {
+            controller.abort(new ArgusError({
+              code: "ARGUS_DEADLINE_EXCEEDED",
+              message: "Argus request deadline exceeded",
+              status: ArgusStatus.DEADLINE_EXCEEDED
+            }));
+          }, remaining);
+        }
+
         const context: ArgusCallContext = {
           messageId: frame.messageId,
           method: frame.method,
-          peer: {
-            address: socket.remoteAddress,
-            port: socket.remotePort
-          },
+          peer: { address: socket.remoteAddress, port: socket.remotePort },
           startedAt: Date.now(),
+          deadlineUnixMs: request.deadlineUnixMs,
+          metadata: request.metadata,
           signal: controller.signal
         };
 
-        const requestPayload = parsePayload(frame.payload);
-        const result = await this.registry.execute(frame.method, requestPayload, context);
-
-        await writer.write(encodeFrame(createFrame({
-          type: ArgusMessageType.RESPONSE,
-          messageId: frame.messageId,
-          method: frame.method,
-          payload: serializePayload(result)
-        }), this.options.protocolLimits));
+        try {
+          const result = await executeAbortable(
+            this.registry.execute(frame.method, request.payload, context),
+            controller.signal
+          );
+          await writer.write(encodeFrame(createFrame({
+            type: ArgusMessageType.RESPONSE,
+            messageId: frame.messageId,
+            method: frame.method,
+            payload: serializePayload(result)
+          }), this.options.protocolLimits));
+        } finally {
+          if (deadlineTimer) clearTimeout(deadlineTimer);
+        }
       });
     } catch (error) {
       const argusError = ArgusError.fromUnknown(error, "ARGUS_HANDLER_ERROR");
       await this.writeError(writer, frame.messageId, frame.method, argusError);
+    } finally {
+      if (calls.get(frame.messageId) === controller) calls.delete(frame.messageId);
     }
   }
 
@@ -205,12 +245,40 @@ export class ArgusServer {
     method: string,
     error: ArgusError
   ): Promise<void> {
-    const response = createFrame({
+    await writer.write(encodeFrame(createFrame({
       type: ArgusMessageType.ERROR,
       messageId,
       method,
       payload: error.toJSON()
-    });
-    await writer.write(encodeFrame(response, this.options.protocolLimits));
+    }), this.options.protocolLimits));
   }
+}
+
+async function executeAbortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) throw abortReason(signal);
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(abortReason(signal));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      }
+    );
+  });
+}
+
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new ArgusError({
+      code: "ARGUS_CALL_CANCELLED",
+      message: "Argus call cancelled",
+      status: ArgusStatus.CANCELLED
+    });
 }

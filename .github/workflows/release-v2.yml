@@ -1,0 +1,100 @@
+name: Release v2
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout verified commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Verify release version
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          if [ "$VERSION" != "2.0.0" ]; then
+            echo "Skipping: verified main is version $VERSION, not 2.0.0."
+            exit 0
+          fi
+
+      - name: Create v2.0.0 tag and GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERIFIED_SHA: ${{ github.event.workflow_run.head_sha }}
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          TAG="v${VERSION}"
+
+          if [ "$TAG" != "v2.0.0" ]; then
+            exit 0
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "$TAG already exists; release is idempotently complete."
+            exit 0
+          fi
+
+          cat > /tmp/argus-v2-release.md <<'NOTES'
+          Argus RPC v2 is a wire-protocol and runtime rewrite focused on the failure cases that matter once RPC traffic becomes concurrent and stateful.
+
+          ## Highlights
+
+          - Argus wire protocol v2 with explicit CANCEL frames
+          - distributed deadlines and cooperative server cancellation via AbortSignal
+          - true multiplexed, out-of-order request completion with message-ID correlation
+          - bounded server concurrency and queued overload protection
+          - incremental TCP frame decoding without repeated whole-buffer concatenation
+          - configurable method, payload and frame resource ceilings
+          - backpressure-aware serialized writes with bounded queued bytes
+          - close/drain race hardening and deterministic fragmentation fuzz coverage
+          - uint32 message-ID wraparound with live-ID collision avoidance
+          - canonical RPC status model and structured retryability
+          - opt-in transient-aware retries with exponential backoff, jitter and elapsed-time budget
+          - multiplexed least-loaded connection pooling with bounded acquisition waits
+          - failed-channel retirement/replacement, circuit breaking and keepalive/RTT primitives
+          - normalized request metadata and composable server interceptors
+          - bounded runtime counters/histograms and expanded pool/server statistics
+          - pluggable codec primitives with JSON and raw-buffer codecs
+          - reproducible benchmark harness with warmup, p50/p90/p95/p99/max latency, error rate and machine metadata
+          - rebuilt README, architecture guide and explicit v1-to-v2 migration guide
+          - zero runtime dependencies
+
+          ## Verification
+
+          The release commit is only published by this workflow after the main-branch CI workflow succeeds. CI validates Node 20, 22 and 24 with clean install, strict TypeScript typecheck, the full test suite and package build; Node 22 additionally runs npm pack --dry-run.
+
+          The v2 release checkpoint contains 128 tests across 37 files, including protocol edge cases, malformed/oversized frames, deterministic fragmentation fuzzing, backpressure races, out-of-order concurrency, deadline/cancellation races, retry behavior, multiplexed pooling, circuit breaking, keepalive, interceptors, metrics and benchmark execution.
+
+          ## Breaking changes
+
+          Argus v1 and v2 are not wire-compatible. The timeout contract now uses ARGUS_DEADLINE_EXCEEDED / DEADLINE_EXCEEDED, requests carry a v2 envelope, practical frame limits are enforced, retry defaults are intentionally more conservative, and the connection pool is multiplexed.
+
+          Read `docs/MIGRATION_V2.md` before upgrading an existing v1 link. The full change inventory is in `CHANGELOG.md`.
+
+          ## Performance claims
+
+          No synthetic throughput multiplier is asserted by this release. The benchmark harness records environment and tail-latency context so results can be reproduced instead of advertised without methodology.
+          NOTES
+
+          gh release create "$TAG" \
+            --target "$VERIFIED_SHA" \
+            --title "Argus RPC v2.0.0 — Protocol, Reliability & Concurrency Rewrite" \
+            --notes-file /tmp/argus-v2-release.md

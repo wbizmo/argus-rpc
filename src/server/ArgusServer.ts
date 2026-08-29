@@ -1,24 +1,49 @@
 import net from "node:net";
 import { ConnectionManager } from "../connection";
 import { ArgusError } from "../errors";
-import { MethodRegistry, type ArgusMethodHandler } from "./method-registry";
 import {
   ArgusMessageType,
+  assertFrameAllowedFromPeer,
   createFrame,
-  decodeFrames,
-  encodeFrame
+  encodeFrame,
+  parsePayload,
+  serializePayload,
+  type ArgusFrame,
+  type ArgusProtocolLimits
 } from "../protocol";
-import { parsePayload, serializePayload } from "../protocol/json";
+import type { ArgusCallContext } from "../rpc";
+import { ArgusFrameStreamDecoder, SocketWriter } from "../transport";
+import { ConcurrencyLimiter } from "./concurrency-limiter";
+import { MethodRegistry, type ArgusMethodHandler } from "./method-registry";
+
+export interface ArgusServerOptions {
+  maxConcurrentCalls?: number;
+  maxQueuedCalls?: number;
+  maxQueuedWriteBytes?: number;
+  protocolLimits?: Partial<ArgusProtocolLimits>;
+}
 
 export interface ArgusServerStats {
   connections: number;
   methods: number;
+  activeCalls: number;
+  queuedCalls: number;
 }
 
 export class ArgusServer {
   private readonly registry = new MethodRegistry();
   private readonly connections = new ConnectionManager();
+  private readonly limiter: ConcurrencyLimiter;
+  private readonly options: ArgusServerOptions;
   private server: net.Server | null = null;
+
+  constructor(options: ArgusServerOptions = {}) {
+    this.options = options;
+    this.limiter = new ConcurrencyLimiter({
+      maxConcurrent: options.maxConcurrentCalls,
+      maxQueued: options.maxQueuedCalls
+    });
+  }
 
   method(name: string, handler: ArgusMethodHandler): this {
     this.registry.register(name, handler);
@@ -32,7 +57,9 @@ export class ArgusServer {
   stats(): ArgusServerStats {
     return {
       connections: this.connections.count(),
-      methods: this.registry.list().length
+      methods: this.registry.list().length,
+      activeCalls: this.limiter.active,
+      queuedCalls: this.limiter.queued
     };
   }
 
@@ -100,83 +127,90 @@ export class ArgusServer {
 
   private handleSocket(socket: net.Socket): void {
     this.connections.add(socket);
+    const decoder = new ArgusFrameStreamDecoder(this.options.protocolLimits);
+    const writer = new SocketWriter(socket, {
+      maxQueuedBytes: this.options.maxQueuedWriteBytes
+    });
 
-    let pendingBuffer = Buffer.alloc(0);
+    socket.once("close", () => {
+      decoder.reset();
+      writer.close();
+    });
 
-    socket.on("data", async (chunk: Buffer) => {
-      const incoming = Buffer.from(chunk);
-      pendingBuffer = Buffer.concat([pendingBuffer, incoming]);
-
+    socket.on("data", (chunk: Buffer) => {
       try {
-        const result = decodeFrames(pendingBuffer);
-        pendingBuffer = Buffer.from(result.remaining);
-
-        for (const frame of result.frames) {
-          await this.handleFrame(socket, frame);
+        const frames = decoder.push(chunk);
+        for (const frame of frames) {
+          assertFrameAllowedFromPeer("server", frame);
+          void this.handleFrame(socket, writer, frame).catch(() => {
+            socket.destroy();
+          });
         }
       } catch (error) {
         const argusError = ArgusError.fromUnknown(error, "ARGUS_INVALID_FRAME");
-
-        const response = createFrame({
-          type: ArgusMessageType.ERROR,
-          messageId: 0,
-          method: "",
-          payload: argusError.toJSON()
-        });
-
-        socket.write(encodeFrame(response));
+        void this.writeError(writer, 0, "", argusError)
+          .finally(() => socket.destroy());
       }
     });
   }
 
   private async handleFrame(
     socket: net.Socket,
-    frame: {
-      type: ArgusMessageType;
-      messageId: number;
-      method: string;
-      payload: Buffer;
-    }
+    writer: SocketWriter,
+    frame: ArgusFrame
   ): Promise<void> {
     if (frame.type === ArgusMessageType.PING) {
-      const response = createFrame({
+      await writer.write(encodeFrame(createFrame({
         type: ArgusMessageType.PONG,
         messageId: frame.messageId,
         method: "",
         payload: null
-      });
-
-      socket.write(encodeFrame(response));
-      return;
-    }
-
-    if (frame.type !== ArgusMessageType.REQUEST) {
+      }), this.options.protocolLimits));
       return;
     }
 
     try {
-      const requestPayload = parsePayload(frame.payload);
-      const result = await this.registry.execute(frame.method, requestPayload);
+      await this.limiter.run(async () => {
+        const controller = new AbortController();
+        const context: ArgusCallContext = {
+          messageId: frame.messageId,
+          method: frame.method,
+          peer: {
+            address: socket.remoteAddress,
+            port: socket.remotePort
+          },
+          startedAt: Date.now(),
+          signal: controller.signal
+        };
 
-      const response = createFrame({
-        type: ArgusMessageType.RESPONSE,
-        messageId: frame.messageId,
-        method: frame.method,
-        payload: serializePayload(result)
+        const requestPayload = parsePayload(frame.payload);
+        const result = await this.registry.execute(frame.method, requestPayload, context);
+
+        await writer.write(encodeFrame(createFrame({
+          type: ArgusMessageType.RESPONSE,
+          messageId: frame.messageId,
+          method: frame.method,
+          payload: serializePayload(result)
+        }), this.options.protocolLimits));
       });
-
-      socket.write(encodeFrame(response));
     } catch (error) {
       const argusError = ArgusError.fromUnknown(error, "ARGUS_HANDLER_ERROR");
-
-      const response = createFrame({
-        type: ArgusMessageType.ERROR,
-        messageId: frame.messageId,
-        method: frame.method,
-        payload: argusError.toJSON()
-      });
-
-      socket.write(encodeFrame(response));
+      await this.writeError(writer, frame.messageId, frame.method, argusError);
     }
+  }
+
+  private async writeError(
+    writer: SocketWriter,
+    messageId: number,
+    method: string,
+    error: ArgusError
+  ): Promise<void> {
+    const response = createFrame({
+      type: ArgusMessageType.ERROR,
+      messageId,
+      method,
+      payload: error.toJSON()
+    });
+    await writer.write(encodeFrame(response, this.options.protocolLimits));
   }
 }

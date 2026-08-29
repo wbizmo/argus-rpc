@@ -12,8 +12,11 @@ import {
 } from "../protocol";
 import {
   ArgusStatus,
+  composeServerInterceptors,
   decodeRequestEnvelope,
-  type ArgusCallContext
+  type ArgusCallContext,
+  type ArgusServerInterceptor,
+  type ArgusServerNext
 } from "../rpc";
 import { ArgusFrameStreamDecoder, SocketWriter } from "../transport";
 import { ConcurrencyLimiter } from "./concurrency-limiter";
@@ -24,6 +27,7 @@ export interface ArgusServerOptions {
   maxQueuedCalls?: number;
   maxQueuedWriteBytes?: number;
   protocolLimits?: Partial<ArgusProtocolLimits>;
+  interceptors?: readonly ArgusServerInterceptor[];
 }
 
 export interface ArgusServerStats {
@@ -38,6 +42,7 @@ export class ArgusServer {
   private readonly connections = new ConnectionManager();
   private readonly limiter: ConcurrencyLimiter;
   private readonly options: ArgusServerOptions;
+  private readonly executeHandler: ArgusServerNext;
   private server: net.Server | null = null;
 
   constructor(options: ArgusServerOptions = {}) {
@@ -46,6 +51,10 @@ export class ArgusServer {
       maxConcurrent: options.maxConcurrentCalls,
       maxQueued: options.maxQueuedCalls
     });
+    this.executeHandler = composeServerInterceptors(
+      options.interceptors ?? [],
+      (payload, context) => this.registry.execute(context.method, payload, context)
+    );
   }
 
   method(name: string, handler: ArgusMethodHandler): this {
@@ -218,7 +227,7 @@ export class ArgusServer {
 
         try {
           const result = await executeAbortable(
-            this.registry.execute(frame.method, request.payload, context),
+            this.executeHandler(request.payload, context),
             controller.signal
           );
           await writer.write(encodeFrame(createFrame({

@@ -1,6 +1,7 @@
 import net from "node:net";
 import { ConnectionManager } from "../connection";
 import { ArgusError } from "../errors";
+import { ArgusMetrics } from "../observability";
 import {
   ArgusMessageType,
   assertFrameAllowedFromPeer,
@@ -28,6 +29,7 @@ export interface ArgusServerOptions {
   maxQueuedWriteBytes?: number;
   protocolLimits?: Partial<ArgusProtocolLimits>;
   interceptors?: readonly ArgusServerInterceptor[];
+  metrics?: ArgusMetrics;
 }
 
 export interface ArgusServerStats {
@@ -43,10 +45,12 @@ export class ArgusServer {
   private readonly limiter: ConcurrencyLimiter;
   private readonly options: ArgusServerOptions;
   private readonly executeHandler: ArgusServerNext;
+  private readonly metricsCollector: ArgusMetrics;
   private server: net.Server | null = null;
 
   constructor(options: ArgusServerOptions = {}) {
     this.options = options;
+    this.metricsCollector = options.metrics ?? new ArgusMetrics();
     this.limiter = new ConcurrencyLimiter({
       maxConcurrent: options.maxConcurrentCalls,
       maxQueued: options.maxQueuedCalls
@@ -73,6 +77,11 @@ export class ArgusServer {
       activeCalls: this.limiter.active,
       queuedCalls: this.limiter.queued
     };
+  }
+
+  metricsSnapshot(): ReturnType<ArgusMetrics["snapshot"]> {
+    this.syncRuntimeGauges();
+    return this.metricsCollector.snapshot();
   }
 
   async listen(port = 0, host = "127.0.0.1"): Promise<number> {
@@ -122,6 +131,9 @@ export class ArgusServer {
 
   private handleSocket(socket: net.Socket): void {
     this.connections.add(socket);
+    this.metricsCollector.increment("connections.opened");
+    this.syncRuntimeGauges();
+
     const decoder = new ArgusFrameStreamDecoder(this.options.protocolLimits);
     const writer = new SocketWriter(socket, {
       maxQueuedBytes: this.options.maxQueuedWriteBytes
@@ -139,16 +151,21 @@ export class ArgusServer {
       calls.clear();
       decoder.reset();
       writer.close();
+      this.metricsCollector.increment("connections.closed");
+      this.syncRuntimeGauges();
     });
 
     socket.on("data", (chunk: Buffer) => {
+      this.metricsCollector.increment("transport.bytes.received", chunk.length);
       try {
         const frames = decoder.push(chunk);
+        this.metricsCollector.increment("transport.frames.received", frames.length);
         for (const frame of frames) {
           assertFrameAllowedFromPeer("server", frame);
           void this.handleFrame(socket, writer, calls, frame).catch(() => socket.destroy());
         }
       } catch (error) {
+        this.metricsCollector.increment("transport.frames.invalid");
         const argusError = ArgusError.fromUnknown(error, "ARGUS_INVALID_FRAME");
         void this.writeError(writer, 0, "", argusError).finally(() => socket.destroy());
       }
@@ -162,16 +179,18 @@ export class ArgusServer {
     frame: ArgusFrame
   ): Promise<void> {
     if (frame.type === ArgusMessageType.PING) {
-      await writer.write(encodeFrame(createFrame({
+      this.metricsCollector.increment("keepalive.pings.received");
+      await this.writeFrame(writer, createFrame({
         type: ArgusMessageType.PONG,
         messageId: frame.messageId,
         method: "",
         payload: null
-      }), this.options.protocolLimits));
+      }));
       return;
     }
 
     if (frame.type === ArgusMessageType.CANCEL) {
+      this.metricsCollector.increment("rpc.cancellations.received");
       calls.get(frame.messageId)?.abort(new ArgusError({
         code: "ARGUS_CALL_CANCELLED",
         message: "Argus call cancelled by peer",
@@ -181,6 +200,7 @@ export class ArgusServer {
     }
 
     if (calls.has(frame.messageId)) {
+      this.metricsCollector.increment("rpc.duplicate_message_ids");
       await this.writeError(writer, frame.messageId, frame.method, new ArgusError({
         code: "ARGUS_DUPLICATE_MESSAGE_ID",
         message: "A call with this message id is already active",
@@ -191,9 +211,12 @@ export class ArgusServer {
 
     const controller = new AbortController();
     calls.set(frame.messageId, controller);
+    this.metricsCollector.increment("rpc.calls.started");
+    const callStartedAt = Date.now();
 
     try {
       await this.limiter.run(async () => {
+        this.syncRuntimeGauges();
         const request = decodeRequestEnvelope(frame.payload);
         let deadlineTimer: NodeJS.Timeout | undefined;
 
@@ -230,21 +253,26 @@ export class ArgusServer {
             this.executeHandler(request.payload, context),
             controller.signal
           );
-          await writer.write(encodeFrame(createFrame({
+          await this.writeFrame(writer, createFrame({
             type: ArgusMessageType.RESPONSE,
             messageId: frame.messageId,
             method: frame.method,
             payload: serializePayload(result)
-          }), this.options.protocolLimits));
+          }));
+          this.metricsCollector.increment("rpc.calls.completed");
         } finally {
           if (deadlineTimer) clearTimeout(deadlineTimer);
         }
       });
     } catch (error) {
       const argusError = ArgusError.fromUnknown(error, "ARGUS_HANDLER_ERROR");
+      this.metricsCollector.increment("rpc.calls.failed");
+      this.metricsCollector.increment(`rpc.status.${argusError.status.toLowerCase()}`);
       await this.writeError(writer, frame.messageId, frame.method, argusError);
     } finally {
+      this.metricsCollector.observe("rpc.server.duration_ms", Date.now() - callStartedAt);
       if (calls.get(frame.messageId) === controller) calls.delete(frame.messageId);
+      this.syncRuntimeGauges();
     }
   }
 
@@ -254,12 +282,25 @@ export class ArgusServer {
     method: string,
     error: ArgusError
   ): Promise<void> {
-    await writer.write(encodeFrame(createFrame({
+    await this.writeFrame(writer, createFrame({
       type: ArgusMessageType.ERROR,
       messageId,
       method,
       payload: error.toJSON()
-    }), this.options.protocolLimits));
+    }));
+  }
+
+  private async writeFrame(writer: SocketWriter, frame: ArgusFrame): Promise<void> {
+    const encoded = encodeFrame(frame, this.options.protocolLimits);
+    await writer.write(encoded);
+    this.metricsCollector.increment("transport.frames.sent");
+    this.metricsCollector.increment("transport.bytes.sent", encoded.length);
+  }
+
+  private syncRuntimeGauges(): void {
+    this.metricsCollector.gauge("connections.active", this.connections.count());
+    this.metricsCollector.gauge("rpc.calls.active", this.limiter.active);
+    this.metricsCollector.gauge("rpc.calls.queued", this.limiter.queued);
   }
 }
 

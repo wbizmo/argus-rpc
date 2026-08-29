@@ -5,13 +5,21 @@ import {
   ArgusFrame,
   ArgusMessageType
 } from "./types";
+import {
+  DEFAULT_PROTOCOL_LIMITS,
+  normalizeProtocolLimits,
+  type ArgusProtocolLimits
+} from "./limits";
 
 export interface DecodeResult {
   frame: ArgusFrame | null;
   remaining: Buffer;
 }
 
-export function decodeFrame(buffer: Buffer): DecodeResult {
+export function decodeFrame(
+  buffer: Buffer,
+  limits: Partial<ArgusProtocolLimits> = DEFAULT_PROTOCOL_LIMITS
+): DecodeResult {
   if (buffer.length < ARGUS_HEADER_LENGTH) {
     return {
       frame: null,
@@ -19,6 +27,7 @@ export function decodeFrame(buffer: Buffer): DecodeResult {
     };
   }
 
+  const normalizedLimits = normalizeProtocolLimits(limits);
   const magic = buffer.toString("ascii", 0, 2);
 
   if (magic !== ARGUS_MAGIC) {
@@ -40,7 +49,20 @@ export function decodeFrame(buffer: Buffer): DecodeResult {
   const messageId = buffer.readUInt32BE(4);
   const methodLength = buffer.readUInt16BE(8);
   const payloadLength = buffer.readUInt32BE(10);
+
+  if (methodLength > normalizedLimits.maxMethodBytes) {
+    throw new Error("ARGUS_METHOD_TOO_LARGE");
+  }
+
+  if (payloadLength > normalizedLimits.maxPayloadBytes) {
+    throw new Error("ARGUS_PAYLOAD_TOO_LARGE");
+  }
+
   const totalLength = ARGUS_HEADER_LENGTH + methodLength + payloadLength;
+
+  if (totalLength > normalizedLimits.maxFrameBytes) {
+    throw new Error("ARGUS_FRAME_TOO_LARGE");
+  }
 
   if (buffer.length < totalLength) {
     return {
@@ -69,7 +91,10 @@ export function decodeFrame(buffer: Buffer): DecodeResult {
   };
 }
 
-export function decodeFrames(buffer: Buffer): {
+export function decodeFrames(
+  buffer: Buffer,
+  limits: Partial<ArgusProtocolLimits> = DEFAULT_PROTOCOL_LIMITS
+): {
   frames: ArgusFrame[];
   remaining: Buffer;
 } {
@@ -77,7 +102,7 @@ export function decodeFrames(buffer: Buffer): {
   let remaining = buffer;
 
   while (remaining.length >= ARGUS_HEADER_LENGTH) {
-    const result = decodeFrame(remaining);
+    const result = decodeFrame(remaining, limits);
 
     if (!result.frame) {
       return {

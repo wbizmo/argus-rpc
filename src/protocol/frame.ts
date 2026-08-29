@@ -2,10 +2,16 @@ import {
   ARGUS_HEADER_LENGTH,
   ARGUS_MAGIC,
   ARGUS_MAGIC_LENGTH,
+  ARGUS_MAX_MESSAGE_ID,
   ARGUS_VERSION,
   ArgusFrame,
   ArgusMessageType
 } from "./types";
+import {
+  DEFAULT_PROTOCOL_LIMITS,
+  normalizeProtocolLimits,
+  type ArgusProtocolLimits
+} from "./limits";
 
 export function createFrame(input: {
   type: ArgusMessageType;
@@ -37,8 +43,17 @@ export function normalizePayload(payload?: Buffer | string | object | null): Buf
   return Buffer.from(JSON.stringify(payload), "utf8");
 }
 
-export function validateFrame(frame: ArgusFrame): void {
-  if (!Number.isInteger(frame.messageId) || frame.messageId < 0) {
+export function validateFrame(
+  frame: ArgusFrame,
+  limits: Partial<ArgusProtocolLimits> = DEFAULT_PROTOCOL_LIMITS
+): void {
+  const normalizedLimits = normalizeProtocolLimits(limits);
+
+  if (
+    !Number.isInteger(frame.messageId) ||
+    frame.messageId < 0 ||
+    frame.messageId > ARGUS_MAX_MESSAGE_ID
+  ) {
     throw new Error("ARGUS_INVALID_MESSAGE_ID");
   }
 
@@ -48,12 +63,16 @@ export function validateFrame(frame: ArgusFrame): void {
 
   const methodLength = Buffer.byteLength(frame.method, "utf8");
 
-  if (methodLength > 65535) {
+  if (methodLength > normalizedLimits.maxMethodBytes) {
     throw new Error("ARGUS_METHOD_TOO_LARGE");
   }
 
-  if (frame.payload.length > 4294967295) {
+  if (frame.payload.length > normalizedLimits.maxPayloadBytes) {
     throw new Error("ARGUS_PAYLOAD_TOO_LARGE");
+  }
+
+  if (getFrameSize(frame) > normalizedLimits.maxFrameBytes) {
+    throw new Error("ARGUS_FRAME_TOO_LARGE");
   }
 }
 
@@ -67,6 +86,7 @@ export {
   ARGUS_HEADER_LENGTH,
   ARGUS_MAGIC,
   ARGUS_MAGIC_LENGTH,
+  ARGUS_MAX_MESSAGE_ID,
   ARGUS_VERSION,
   ArgusMessageType
 };

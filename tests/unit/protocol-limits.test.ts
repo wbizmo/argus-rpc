@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ARGUS_HEADER_LENGTH,
   ARGUS_MAX_MESSAGE_ID,
+  ARGUS_VERSION,
   ArgusMessageType,
   createFrame,
   decodeFrame,
@@ -13,7 +14,7 @@ describe("Argus protocol limits", () => {
   it("rejects a declared payload that exceeds the configured limit before its body arrives", () => {
     const header = Buffer.alloc(ARGUS_HEADER_LENGTH);
     header.write("AR", 0, 2, "ascii");
-    header.writeUInt8(1, 2);
+    header.writeUInt8(ARGUS_VERSION, 2);
     header.writeUInt8(ArgusMessageType.REQUEST, 3);
     header.writeUInt32BE(1, 4);
     header.writeUInt16BE(0, 8);

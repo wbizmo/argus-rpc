@@ -16,20 +16,21 @@ describe("Argus protocol primitives", () => {
     expect(ARGUS_MAGIC_LENGTH).toBe(2);
   });
 
-  it("uses protocol version 1", () => {
-    expect(ARGUS_VERSION).toBe(1);
+  it("uses protocol version 2", () => {
+    expect(ARGUS_VERSION).toBe(2);
   });
 
   it("uses a 14 byte fixed header", () => {
     expect(ARGUS_HEADER_LENGTH).toBe(14);
   });
 
-  it("defines the v1 message types", () => {
+  it("defines the v2 message types", () => {
     expect(ArgusMessageType.REQUEST).toBe(1);
     expect(ArgusMessageType.RESPONSE).toBe(2);
     expect(ArgusMessageType.ERROR).toBe(3);
     expect(ArgusMessageType.PING).toBe(4);
     expect(ArgusMessageType.PONG).toBe(5);
+    expect(ArgusMessageType.CANCEL).toBe(6);
   });
 
   it("normalizes object payloads to JSON buffers", () => {

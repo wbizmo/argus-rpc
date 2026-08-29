@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { ArgusClient, ArgusServer } from "../../src";
+import { ArgusClient, ArgusError, ArgusServer, ArgusStatus } from "../../src";
 
 describe("Argus retry integration", () => {
   let server: ArgusServer | null = null;
@@ -8,71 +8,61 @@ describe("Argus retry integration", () => {
   afterEach(async () => {
     await client?.close();
     await server?.close();
-
     client = null;
     server = null;
   });
 
-  it("retries failed calls and eventually succeeds", async () => {
+  it("retries failures explicitly classified as transient", async () => {
     server = new ArgusServer();
-
     let attempts = 0;
 
     server.method("unstable.method", async () => {
       attempts += 1;
-
       if (attempts < 3) {
-        throw new Error("ARGUS_TEMPORARY_FAILURE");
+        throw new ArgusError({
+          code: "ARGUS_TEMPORARY_FAILURE",
+          message: "temporary failure",
+          status: ArgusStatus.UNAVAILABLE
+        });
       }
-
-      return {
-        ok: true,
-        attempts
-      };
+      return { ok: true, attempts };
     });
 
     const port = await server.listen();
-
     client = new ArgusClient({
       port,
-      retry: {
-        retries: 3,
-        baseDelayMs: 1,
-        maxDelayMs: 2
-      }
+      retry: { retries: 3, baseDelayMs: 1, maxDelayMs: 2, jitterRatio: 0 }
     });
 
-    await expect(client.call("unstable.method", {})).resolves.toEqual({
+    await expect(client.call("unstable.method", {}, 1000)).resolves.toEqual({
       ok: true,
       attempts: 3
     });
-
     expect(attempts).toBe(3);
   });
 
-  it("stops retrying after retry exhaustion", async () => {
+  it("does not duplicate non-retryable application work by default", async () => {
     server = new ArgusServer();
-
     let attempts = 0;
 
-    server.method("always.fails", async () => {
+    server.method("non.retryable", async () => {
       attempts += 1;
-      throw new Error("ARGUS_ALWAYS_FAILS");
+      throw new ArgusError({
+        code: "ARGUS_BUSINESS_RULE",
+        message: "business rule failed",
+        status: ArgusStatus.FAILED_PRECONDITION
+      });
     });
 
     const port = await server.listen();
-
     client = new ArgusClient({
       port,
-      retry: {
-        retries: 2,
-        baseDelayMs: 1,
-        maxDelayMs: 2
-      }
+      retry: { retries: 3, baseDelayMs: 1, maxDelayMs: 2, jitterRatio: 0 }
     });
 
-    await expect(client.call("always.fails", {})).rejects.toThrow("ARGUS_ALWAYS_FAILS");
-
-    expect(attempts).toBe(3);
+    await expect(client.call("non.retryable", {}, 1000)).rejects.toMatchObject({
+      status: ArgusStatus.FAILED_PRECONDITION
+    });
+    expect(attempts).toBe(1);
   });
 });

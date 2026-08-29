@@ -4,7 +4,8 @@ export type ArgusPeerRole = "client" | "server";
 
 const CLIENT_TO_SERVER = new Set<ArgusMessageType>([
   ArgusMessageType.REQUEST,
-  ArgusMessageType.PING
+  ArgusMessageType.PING,
+  ArgusMessageType.CANCEL
 ]);
 
 const SERVER_TO_CLIENT = new Set<ArgusMessageType>([

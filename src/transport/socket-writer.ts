@@ -72,9 +72,12 @@ export class SocketWriter {
     this.closed = true;
 
     for (const item of this.queue.splice(0)) {
-      this.queuedBytes -= item.buffer.length;
       item.reject(error);
     }
+
+    this.queuedBytes = 0;
+    this.writing = false;
+    this.socket.removeAllListeners("drain");
   }
 
   private pump(): void {
@@ -91,11 +94,23 @@ export class SocketWriter {
 
     const finish = (error?: Error): void => {
       if (settled) return;
+
+      if (this.closed) {
+        settled = true;
+        this.socket.off("drain", onDrain);
+        return;
+      }
+
       if (!error && (!callbackDone || (!accepted && !drained))) return;
+
       settled = true;
       this.socket.off("drain", onDrain);
-      this.queue.shift();
-      this.queuedBytes -= item.buffer.length;
+
+      if (this.queue[0] === item) {
+        this.queue.shift();
+        this.queuedBytes = Math.max(0, this.queuedBytes - item.buffer.length);
+      }
+
       this.writing = false;
 
       if (error) item.reject(error);
@@ -119,7 +134,7 @@ export class SocketWriter {
         finish();
       });
 
-      if (!accepted) {
+      if (!accepted && !this.closed) {
         this.socket.once("drain", onDrain);
       }
     } catch (error) {

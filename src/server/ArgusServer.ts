@@ -30,6 +30,12 @@ export interface ArgusServerOptions {
   protocolLimits?: Partial<ArgusProtocolLimits>;
   interceptors?: readonly ArgusServerInterceptor[];
   metrics?: ArgusMetrics;
+  /**
+   * Argus TCP transport is plaintext. Remote binds are refused by default.
+   * Set this only when transport encryption/authentication is provided by a
+   * trusted outer layer such as TLS termination, WireGuard, or a service mesh.
+   */
+  allowInsecureRemote?: boolean;
 }
 
 export interface ArgusServerStats {
@@ -89,6 +95,13 @@ export class ArgusServer {
       throw new ArgusError({
         code: "ARGUS_SERVER_ALREADY_LISTENING",
         message: "Argus server is already listening"
+      });
+    }
+
+    if (!isLoopbackHost(host) && !this.options.allowInsecureRemote) {
+      throw new ArgusError({
+        code: "ARGUS_INSECURE_REMOTE_BIND",
+        message: "Argus uses a plaintext TCP transport and refuses non-loopback binds by default. Provide transport encryption/authentication externally and set allowInsecureRemote: true only when that boundary is in place."
       });
     }
 
@@ -302,6 +315,17 @@ export class ArgusServer {
     this.metricsCollector.gauge("rpc.calls.active", this.limiter.active);
     this.metricsCollector.gauge("rpc.calls.queued", this.limiter.queued);
   }
+}
+
+function isLoopbackHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  if (normalized === "localhost" || normalized === "::1" || normalized === "0:0:0:0:0:0:0:1") {
+    return true;
+  }
+  const match = normalized.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!match) return false;
+  const octets = match.slice(1).map(Number);
+  return octets.every((octet) => octet >= 0 && octet <= 255) && octets[0] === 127;
 }
 
 async function executeAbortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {

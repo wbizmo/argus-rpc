@@ -21,6 +21,14 @@ describe("Argus server lifecycle", () => {
     await expect(server.listen()).rejects.toBeInstanceOf(ArgusError);
   });
 
+  it("refuses plaintext non-loopback binds by default", async () => {
+    server = new ArgusServer();
+
+    await expect(server.listen(0, "0.0.0.0")).rejects.toMatchObject({
+      code: "ARGUS_INSECURE_REMOTE_BIND"
+    });
+  });
+
   it("allows close to be called before listen", async () => {
     server = new ArgusServer();
 

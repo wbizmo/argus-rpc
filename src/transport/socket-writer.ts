@@ -148,7 +148,7 @@ export class SocketWriter {
         finish();
       });
 
-      if (!accepted && !this.closed) {
+      if (!accepted && !this.closed && !settled) {
         this.drainListener = onDrain;
         this.socket.once("drain", onDrain);
       }

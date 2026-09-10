@@ -1,10 +1,13 @@
 import {
   ARGUS_HEADER_LENGTH,
-  decodeFrame,
   normalizeProtocolLimits,
   type ArgusFrame,
   type ArgusProtocolLimits
 } from "../protocol";
+import {
+  decodeFrameFromValidatedHeader,
+  decodeFrameHeaderWithNormalizedLimits
+} from "../protocol/decoder";
 import { ChunkQueue } from "./chunk-queue";
 
 export class ArgusFrameStreamDecoder {
@@ -24,25 +27,13 @@ export class ArgusFrameStreamDecoder {
     const frames: ArgusFrame[] = [];
 
     while (this.queue.length >= ARGUS_HEADER_LENGTH) {
-      const header = this.queue.peek(ARGUS_HEADER_LENGTH);
-      const methodLength = header.readUInt16BE(8);
-      const payloadLength = header.readUInt32BE(10);
+      const encodedHeader = this.queue.peek(ARGUS_HEADER_LENGTH);
+      const header = decodeFrameHeaderWithNormalizedLimits(encodedHeader, this.limits);
+      if (!header) throw new Error("ARGUS_STREAM_DECODER_INVARIANT");
+      if (this.queue.length < header.totalLength) break;
 
-      if (methodLength > this.limits.maxMethodBytes) {
-        throw new Error("ARGUS_METHOD_TOO_LARGE");
-      }
-      if (payloadLength > this.limits.maxPayloadBytes) {
-        throw new Error("ARGUS_PAYLOAD_TOO_LARGE");
-      }
-
-      const totalLength = ARGUS_HEADER_LENGTH + methodLength + payloadLength;
-      if (totalLength > this.limits.maxFrameBytes) {
-        throw new Error("ARGUS_FRAME_TOO_LARGE");
-      }
-      if (this.queue.length < totalLength) break;
-
-      const encoded = this.queue.read(totalLength);
-      const decoded = decodeFrame(encoded, this.limits);
+      const encoded = this.queue.read(header.totalLength);
+      const decoded = decodeFrameFromValidatedHeader(encoded, header);
       if (!decoded.frame || decoded.remaining.length !== 0) {
         throw new Error("ARGUS_STREAM_DECODER_INVARIANT");
       }

@@ -78,4 +78,42 @@ describe("Argus connection pool integration", () => {
 
     expect(pool.stats().created).toBe(1);
   });
+
+  it("drops timed-out capacity waiters without leaving stale queue entries", async () => {
+    server = new ArgusServer();
+    server.method("work.delay", async (payload) => {
+      const { delayMs } = payload as { delayMs: number };
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      return { ok: true };
+    });
+    const port = await server.listen();
+
+    pool = new ArgusConnectionPool({
+      port,
+      size: 1,
+      maxConcurrentPerConnection: 1,
+      acquireTimeoutMs: 25,
+      circuitBreaker: false
+    });
+
+    const first = pool.call("work.delay", { delayMs: 100 });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const waiting = Array.from({ length: 100 }, () =>
+      pool!.call("work.delay", { delayMs: 0 }).then(
+        () => "completed",
+        (error: unknown) => (error as { code?: string }).code
+      )
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(pool.stats().waiters).toBeGreaterThan(0);
+
+    const outcomes = await Promise.all(waiting);
+    expect(outcomes.every((code) => code === "ARGUS_POOL_ACQUIRE_TIMEOUT")).toBe(true);
+    expect(pool.stats().waiters).toBe(0);
+
+    await first;
+    await expect(pool.call("work.delay", { delayMs: 0 })).resolves.toEqual({ ok: true });
+  });
 });

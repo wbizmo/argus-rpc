@@ -1,5 +1,6 @@
 export class ChunkQueue {
   private readonly chunks: Buffer[] = [];
+  private headIndex = 0;
   private headOffset = 0;
   private byteLength = 0;
 
@@ -17,7 +18,7 @@ export class ChunkQueue {
     this.assertReadable(length);
     if (length === 0) return Buffer.alloc(0);
 
-    const head = this.chunks[0];
+    const head = this.chunks[this.headIndex];
     if (head && head.length - this.headOffset >= length) {
       return head.subarray(this.headOffset, this.headOffset + length);
     }
@@ -31,7 +32,7 @@ export class ChunkQueue {
     this.assertReadable(length);
     if (length === 0) return Buffer.alloc(0);
 
-    const head = this.chunks[0];
+    const head = this.chunks[this.headIndex];
     if (head && head.length - this.headOffset >= length) {
       const output = head.subarray(this.headOffset, this.headOffset + length);
       this.headOffset += length;
@@ -44,7 +45,7 @@ export class ChunkQueue {
     let written = 0;
 
     while (written < length) {
-      const chunk = this.chunks[0];
+      const chunk = this.chunks[this.headIndex];
       if (!chunk) throw new Error("ARGUS_CHUNK_QUEUE_UNDERFLOW");
 
       const available = chunk.length - this.headOffset;
@@ -61,6 +62,7 @@ export class ChunkQueue {
 
   clear(): void {
     this.chunks.length = 0;
+    this.headIndex = 0;
     this.headOffset = 0;
     this.byteLength = 0;
   }
@@ -75,17 +77,29 @@ export class ChunkQueue {
   }
 
   private compactHead(): void {
-    const head = this.chunks[0];
-    if (head && this.headOffset >= head.length) {
-      this.chunks.shift();
+    while (this.headIndex < this.chunks.length) {
+      const head = this.chunks[this.headIndex];
+      if (!head || this.headOffset < head.length) break;
+      this.headIndex += 1;
       this.headOffset = 0;
+    }
+
+    if (this.headIndex === this.chunks.length) {
+      this.chunks.length = 0;
+      this.headIndex = 0;
+      return;
+    }
+
+    if (this.headIndex >= 64 && this.headIndex * 2 >= this.chunks.length) {
+      this.chunks.splice(0, this.headIndex);
+      this.headIndex = 0;
     }
   }
 
   private copyInto(target: Buffer, length: number): void {
     let remaining = length;
     let targetOffset = 0;
-    let index = 0;
+    let index = this.headIndex;
     let sourceOffset = this.headOffset;
 
     while (remaining > 0) {

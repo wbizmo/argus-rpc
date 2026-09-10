@@ -12,6 +12,7 @@ import {
   normalizeProtocolLimits,
   type ArgusProtocolLimits
 } from "./limits";
+import { validateFrameShape } from "./validation";
 
 export function createFrame(input: {
   type: ArgusMessageType;
@@ -48,37 +49,12 @@ export function validateFrame(
   limits: Partial<ArgusProtocolLimits> = DEFAULT_PROTOCOL_LIMITS
 ): void {
   const normalizedLimits = normalizeProtocolLimits(limits);
-
-  if (
-    !Number.isInteger(frame.messageId) ||
-    frame.messageId < 0 ||
-    frame.messageId > ARGUS_MAX_MESSAGE_ID
-  ) {
-    throw new Error("ARGUS_INVALID_MESSAGE_ID");
-  }
-
-  if (!Object.values(ArgusMessageType).includes(frame.type)) {
-    throw new Error("ARGUS_INVALID_MESSAGE_TYPE");
-  }
-
   const methodLength = Buffer.byteLength(frame.method, "utf8");
-
-  if (methodLength > normalizedLimits.maxMethodBytes) {
-    throw new Error("ARGUS_METHOD_TOO_LARGE");
-  }
-
-  if (frame.payload.length > normalizedLimits.maxPayloadBytes) {
-    throw new Error("ARGUS_PAYLOAD_TOO_LARGE");
-  }
-
-  if (getFrameSize(frame) > normalizedLimits.maxFrameBytes) {
-    throw new Error("ARGUS_FRAME_TOO_LARGE");
-  }
+  validateFrameShape(frame, methodLength, normalizedLimits);
 }
 
 export function getFrameSize(frame: ArgusFrame): number {
   const methodLength = Buffer.byteLength(frame.method, "utf8");
-
   return ARGUS_HEADER_LENGTH + methodLength + frame.payload.length;
 }
 

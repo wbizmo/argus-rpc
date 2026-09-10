@@ -11,6 +11,7 @@ import {
 import {
   ArgusStatus,
   encodeRequestEnvelope,
+  isArgusStatus,
   type ArgusMetadata
 } from "../rpc";
 import { ArgusFrameStreamDecoder, SocketWriter } from "../transport";
@@ -355,9 +356,8 @@ export class ArgusClient {
         retryable?: boolean;
         details?: unknown;
       } | undefined;
-      const status = Object.values(ArgusStatus).includes(errorPayload?.status as ArgusStatus)
-        ? errorPayload?.status as ArgusStatus
-        : ArgusStatus.UNKNOWN;
+      const remoteStatus = errorPayload?.status;
+      const status = isArgusStatus(remoteStatus) ? remoteStatus : ArgusStatus.UNKNOWN;
 
       pending.reject(new ArgusError({
         code: errorPayload?.code ?? "ARGUS_REMOTE_ERROR",

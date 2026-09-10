@@ -8,6 +8,10 @@ export type ArgusMethodHandler = (
 export class MethodRegistry {
   private readonly handlers = new Map<string, ArgusMethodHandler>();
 
+  get size(): number {
+    return this.handlers.size;
+  }
+
   register(method: string, handler: ArgusMethodHandler): void {
     if (!method || typeof method !== "string") {
       throw new Error("ARGUS_INVALID_METHOD_NAME");

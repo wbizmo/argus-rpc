@@ -49,3 +49,9 @@ jobs:
       - name: Verify package contents
         if: matrix.node-version == 22
         run: npm pack --dry-run
+
+      - name: Run v2.1 hot-path benchmark smoke
+        if: matrix.node-version == 22
+        env:
+          ARGUS_V21_BENCH_SCALE: smoke
+        run: npm run bench:v2.1

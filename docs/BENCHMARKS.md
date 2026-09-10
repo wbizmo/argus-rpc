@@ -1,8 +1,10 @@
 # Argus RPC Benchmarks
 
-Argus ships a reproducible local benchmark harness for comparing the Argus TCP request/response path with a Node HTTP/JSON baseline. It is a diagnostic tool, not a universal performance claim.
+Argus ships reproducible local benchmark harnesses for transport comparison and for the v2.1 hot-path engineering work. They are diagnostic tools, not universal performance claims.
 
-## Run
+## End-to-end Argus vs HTTP/JSON
+
+Run:
 
 ```bash
 npm run bench
@@ -27,31 +29,49 @@ npm run bench
 
 Invalid or non-positive numeric values fall back to the defaults.
 
-## Reported measurements
+Each transport reports total/completed/failed requests, error rate, duration, average latency, p50/p90/p95/p99/max latency and requests per second. The runner also records Node version, operating system, architecture, CPU model and logical CPU count.
 
-Each transport reports:
+The Argus side uses one persistent multiplexed `ArgusClient` connection. The HTTP baseline uses Node's built-in HTTP implementation with keep-alive and a maximum socket count equal to benchmark concurrency. This is a real local-path comparison, but it does not isolate every protocol/runtime variable.
 
-- total, completed and failed requests;
-- error rate;
-- total measured duration;
-- average latency;
-- p50, p90, p95 and p99 latency;
-- maximum observed latency;
-- requests per second.
+## v2.1 hot-path benchmark
 
-The runner also records the Node version, operating system, architecture, CPU model and logical CPU count. These environment fields are mandatory context for any published result.
+Run the engineering benchmark with:
 
-## Comparison shape
+```bash
+npm run bench:v2.1
+```
 
-### Argus
+It exercises the areas changed during the v2.1 efficiency pass:
 
-The benchmark uses one persistent `ArgusClient` connection and multiplexes concurrent RPCs across it. The server echoes a small JSON-compatible payload through the normal Argus request envelope and response path.
+- message-ID allocation against the live pending `Map`;
+- a same-process legacy reference that rebuilds `new Set(pending.keys())` per allocation;
+- `ChunkQueue` consumption using the v2.1 head cursor;
+- a same-process legacy reference that removes array index zero with `shift()`;
+- deep `ConcurrencyLimiter` queue drain;
+- protocol encode + streaming decode throughput.
 
-### HTTP baseline
+The benchmark always emits a `RESULT_JSON=` record containing the commit (when `GITHUB_SHA` or `ARGUS_BENCH_COMMIT` is available), Node/runtime details, CPU information, benchmark configuration and every sample. The legacy reference measurements are deliberately small reproductions of the removed algorithms, not old binaries or claims about an historical release.
 
-The baseline uses Node's built-in HTTP implementation with a keep-alive agent and a maximum socket count equal to benchmark concurrency. Requests are POSTed to a local JSON echo endpoint. Keep-alive is intentional so the comparison does not artificially penalize HTTP with a new TCP connection for every request.
+For a shorter CI-sized run:
 
-The benchmark therefore compares two real local request paths, but it still does **not** isolate every variable. Argus framing, request envelopes, HTTP parsing, header processing, scheduling and implementation details differ.
+```bash
+ARGUS_V21_BENCH_SCALE=smoke npm run bench:v2.1
+```
+
+The Node 22 CI job executes this smoke run after typecheck, tests, build and package verification. Its output therefore provides a release-candidate record tied to an exact Git commit.
+
+### Why CI does not gate wall-clock performance
+
+Shared GitHub runners are noisy. Argus does **not** fail CI because one timing sample is slower than a hard millisecond threshold. Instead, `tests/benchmark/complexity-regression.test.ts` enforces the structural properties responsible for the v2.1 complexity fixes, including:
+
+- no per-request pending-ID `Set` snapshot;
+- no `Array.shift()` in the identified FIFO hot paths;
+- no per-frame message-type enum enumeration;
+- no per-error status enum enumeration;
+- no sorted method list merely to count methods;
+- no removal of unrelated socket `drain` listeners.
+
+Behavioral stress tests separately exercise deep queues, fragmented reads, contention, cancellation and backpressure. This makes the CI gate deterministic while keeping benchmark timings available for analysis.
 
 ## Publishing results
 
@@ -62,7 +82,7 @@ Do not paste a single throughput number into the README and present it as a prop
 3. OS and architecture;
 4. CPU model and logical CPU count;
 5. request count, concurrency and warmup size;
-6. all latency percentiles, throughput and error rate;
+6. all relevant latency/throughput/error measurements;
 7. whether the machine was otherwise idle;
 8. multiple runs, with the median run preferred over the best run.
 
@@ -72,7 +92,8 @@ For deeper work, sweep several dimensions rather than tuning one favorite scenar
 - request count: `10k`, `100k`, and larger only when the host is stable;
 - payload sizes: empty, `64 B`, `1 KiB`, `16 KiB`, `1 MiB`;
 - one multiplexed connection versus a configured connection pool;
-- supported Node versions.
+- supported Node versions;
+- fragmented frame sizes and write-queue depths for transport work.
 
 Store raw machine-readable output with the benchmark date and commit SHA if results are going to be referenced from documentation.
 

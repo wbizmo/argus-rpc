@@ -12,13 +12,29 @@ Binary framing · multiplexed calls · distributed deadlines · cancellation · 
 
 Argus RPC is a compact RPC runtime and wire protocol built from first principles in TypeScript. It uses persistent TCP connections, a small binary frame header and message IDs to multiplex independent calls without imposing HTTP semantics on the transport.
 
-Version 2 focuses on the parts that make protocol implementations difficult in practice: hostile frame lengths, fragmented reads, write backpressure, concurrent completion ordering, message-ID wraparound, deadlines, cancellation races, retries, overloaded servers, failed pooled connections and bounded observability.
+The current release is **v2.1.0**. It remains wire-compatible with Argus v2 while tightening state-machine correctness, cancellation behavior and the asymptotic cost of transport/scheduling hot paths.
 
 Argus is an infrastructure engineering project, not a claim that every system should replace HTTP or gRPC.
 
+## What's new in v2.1.0
+
+v2.1 is an engineering-hardening release rather than a protocol rewrite.
+
+- removed the per-request `Set` snapshot from message-ID allocation, eliminating O(n) temporary work for the common allocation path;
+- replaced repeated front-of-array removals in transport/scheduling queues with head cursors and bounded compaction, avoiding accidental quadratic drain behavior;
+- made queued server cancellation release queue capacity instead of leaving cancelled work resident until dispatch;
+- made retry backoff abort-aware so cancellation does not wait for an unrelated sleep to finish;
+- hardened client response correlation so a PONG cannot settle an RPC call and a normal response cannot silently settle a ping;
+- fixed failed server-listen recovery so a bind failure does not leave the server permanently marked as listening;
+- fixed circuit-breaker half-open configuration/race behavior;
+- reduced repeated protocol normalization, enum enumeration and frame-size work in encode/decode paths;
+- made server method-count statistics O(1) instead of sorting registered method names merely to count them;
+- added structural complexity regression tests and a dedicated `bench:v2.1` hot-path benchmark with machine-readable output;
+- remote plaintext binds remain refused by default unless the caller explicitly opts into an externally protected transport boundary.
+
 ## At a glance
 
-| Capability | Argus RPC v2 |
+| Capability | Argus RPC v2.1 |
 | --- | --- |
 | Transport | persistent TCP |
 | Wire protocol | Argus v2 |
@@ -26,7 +42,7 @@ Argus is an infrastructure engineering project, not a claim that every system sh
 | Multiplexing | yes, responses correlate by uint32 message ID |
 | Request concurrency | bounded server execution + bounded queue |
 | Deadlines | absolute deadline propagated to the server |
-| Cancellation | `CANCEL` frame + handler `AbortSignal` |
+| Cancellation | `CANCEL` frame + handler `AbortSignal` + cancellation-aware queueing/retry backoff |
 | Backpressure | serialized socket writer + bounded queued bytes + `drain` handling |
 | Retries | opt-in, transient-aware, exponential backoff + jitter + elapsed-time budget |
 | Connection pool | least-loaded multiplexed channels, bounded acquisition wait, dead-channel replacement |
@@ -39,7 +55,7 @@ Argus is an infrastructure engineering project, not a claim that every system sh
 | Codec extensibility | registry API with JSON and raw-buffer codec primitives |
 | Runtime dependencies | **0** |
 | CI runtimes | Node 20, 22 and 24 |
-| Test suite | **128 tests across 37 files** at the v2 release checkpoint |
+| Test suite | **156 tests across 39 files** at the v2.1 release checkpoint |
 
 ## Protocol limits
 
@@ -152,6 +168,8 @@ await server.listen(7000);
 
 Handler context includes the message ID, method, peer address, start time, optional absolute deadline, normalized metadata and an `AbortSignal`.
 
+Argus uses plaintext raw TCP. Non-loopback binds are refused by default; only opt into a remote bind when encryption/authentication is supplied by a trusted outer layer such as TLS termination, WireGuard or a service mesh.
+
 ## Client
 
 ```ts
@@ -204,6 +222,8 @@ const result = await pool.call("inventory.reserve", {
 ```
 
 Pool slots are not one-request-at-a-time locks. Each healthy TCP channel can carry many in-flight calls, and the pool chooses the least-loaded healthy connection. Transport failures retire the channel so capacity can be recreated instead of leaving a dead entry permanently occupying a pool slot.
+
+The deliberately small bounded pool still uses a linear least-loaded scan. v2.1 intentionally does **not** replace this with a heap: for the default pool size, the simpler scan has lower reasoning and maintenance cost without creating a meaningful hot-path problem.
 
 ## Interceptors
 
@@ -265,19 +285,23 @@ The suite exercises more than happy-path request/response behavior:
 - invalid magic/version/type/direction;
 - hostile declared payload sizes before body arrival;
 - uint32 message-ID boundary and wraparound collision avoidance;
+- pending response-type confusion and invalid peer responses;
 - multiple asynchronous handlers completing out of order;
-- bounded server concurrency and overload behavior;
+- bounded server concurrency, queued cancellation and overload behavior;
 - client deadline versus response races;
-- explicit cancellation propagation;
+- explicit cancellation propagation and abort-aware retry backoff;
 - connection-close cancellation of active handlers;
+- failed bind followed by successful server listen retry;
 - retry exhaustion and retry classification;
-- pooled multiplexing and failed-channel replacement;
-- circuit breaker state changes;
+- pooled multiplexing, capacity wakeups and failed-channel replacement;
+- circuit breaker validation and concurrent half-open races;
 - keepalive behavior;
 - socket writer backpressure and close-during-drain races;
+- deep fragmented chunk queues and deep serialized write queues;
 - interceptor short-circuiting;
 - bounded metrics collection;
-- benchmark executable validation.
+- structural complexity regression guards;
+- benchmark executable and machine-readable output validation.
 
 ## Development
 
@@ -289,17 +313,25 @@ npm run build
 npm pack --dry-run
 ```
 
-CI executes the supported runtime matrix on Node **20, 22 and 24**. Node 22 additionally verifies the package contents with `npm pack --dry-run`.
+CI executes the supported runtime matrix on Node **20, 22 and 24**. Node 22 additionally verifies package contents with `npm pack --dry-run` and executes the v2.1 hot-path benchmark smoke.
 
 ## Benchmarking
+
+General RPC-vs-HTTP harness:
 
 ```bash
 npm run bench
 ```
 
-The benchmark reports error rate, average latency, p50/p90/p95/p99/max latency and requests per second after a configurable warmup. It also emits runtime/CPU metadata and can produce a machine-readable JSON record.
+v2.1 engineering hot-path harness:
 
-Argus intentionally publishes **no made-up headline throughput number** in this README. Performance figures are meaningful only with their commit, machine, Node version, request count, concurrency, payload shape and methodology.
+```bash
+npm run bench:v2.1
+```
+
+The benchmark tooling reports environment and operation metadata and can emit machine-readable `RESULT_JSON` output. v2.1 CI intentionally does not fail on wall-clock thresholds; deterministic structural tests guard the complexity invariants while timings remain diagnostic evidence.
+
+Argus intentionally publishes **no made-up headline throughput number** in this README. Performance figures are meaningful only with their commit, machine, Node version, workload and methodology.
 
 See [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
@@ -331,7 +363,9 @@ Design rule: **protocol is bytes; transport is sockets; RPC is call semantics; c
 - [Retries](docs/RETRIES.md)
 - [Testing](docs/TESTING.md)
 - [Benchmarks](docs/BENCHMARKS.md)
+- [Engineering invariants](docs/ENGINEERING_INVARIANTS.md)
 - [Roadmap](docs/ROADMAP.md)
+- [Changelog](CHANGELOG.md)
 
 ## Scope
 

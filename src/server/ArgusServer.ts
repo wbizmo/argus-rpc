@@ -79,7 +79,7 @@ export class ArgusServer {
   stats(): ArgusServerStats {
     return {
       connections: this.connections.count(),
-      methods: this.registry.list().length,
+      methods: this.registry.size,
       activeCalls: this.limiter.active,
       queuedCalls: this.limiter.queued
     };

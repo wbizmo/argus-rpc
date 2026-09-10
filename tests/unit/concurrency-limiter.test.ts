@@ -38,4 +38,51 @@ describe("ConcurrencyLimiter", () => {
     await first;
     await second;
   });
+
+  it("frees effective queue capacity immediately when queued work is cancelled", async () => {
+    const limiter = new ConcurrencyLimiter({ maxConcurrent: 1, maxQueued: 1 });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const first = limiter.run(async () => gate);
+    const controller = new AbortController();
+    const cancelled = limiter.run(async () => "never", controller.signal);
+
+    expect(limiter.queued).toBe(1);
+    controller.abort(new Error("cancelled"));
+    await expect(cancelled).rejects.toThrow("cancelled");
+    expect(limiter.queued).toBe(0);
+
+    const replacement = limiter.run(async () => "replacement");
+    expect(limiter.queued).toBe(1);
+
+    release();
+    await first;
+    await expect(replacement).resolves.toBe("replacement");
+    expect(limiter.queued).toBe(0);
+    expect(limiter.active).toBe(0);
+  });
+
+  it("drains a deep queue in FIFO order without head shifting", async () => {
+    const depth = 1500;
+    const limiter = new ConcurrencyLimiter({ maxConcurrent: 1, maxQueued: depth });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const first = limiter.run(async () => gate);
+    const queued = Array.from({ length: depth }, (_, index) =>
+      limiter.run(async () => index)
+    );
+
+    expect(limiter.queued).toBe(depth);
+    release();
+    await first;
+
+    const results = await Promise.all(queued);
+    expect(results).toEqual(Array.from({ length: depth }, (_, index) => index));
+    expect(limiter.queued).toBe(0);
+    expect(limiter.active).toBe(0);
+  });
 });

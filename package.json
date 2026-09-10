@@ -29,6 +29,7 @@
     "build": "tsup src/index.ts --format cjs,esm --dts",
     "verify": "npm run typecheck && npm test && npm run build",
     "bench": "tsx benchmarks/argus-vs-rest.ts",
+    "bench:v2.1": "tsx benchmarks/v2.1-hot-paths.ts",
     "prepack": "npm run verify"
   },
   "keywords": [

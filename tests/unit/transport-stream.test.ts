@@ -20,6 +20,21 @@ describe("transport buffering", () => {
     expect(queue.length).toBe(0);
   });
 
+  it("consumes thousands of tiny chunks while preserving byte order", () => {
+    const queue = new ChunkQueue();
+    const count = 4096;
+    for (let index = 0; index < count; index += 1) {
+      queue.append(Buffer.from([index % 251]));
+    }
+
+    const output = queue.read(count);
+    expect(output).toHaveLength(count);
+    for (let index = 0; index < count; index += 1) {
+      expect(output[index]).toBe(index % 251);
+    }
+    expect(queue.length).toBe(0);
+  });
+
   it("decodes a frame fragmented into single-byte chunks", () => {
     const encoded = encodeFrame(createFrame({
       type: ArgusMessageType.REQUEST,

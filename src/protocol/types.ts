@@ -13,13 +13,15 @@ export enum ArgusMessageType {
   CANCEL = 6
 }
 
+export function isArgusMessageType(value: number): value is ArgusMessageType {
+  return Number.isInteger(value) &&
+    value >= ArgusMessageType.REQUEST &&
+    value <= ArgusMessageType.CANCEL;
+}
+
 export interface ArgusFrame {
   type: ArgusMessageType;
   messageId: number;
   method: string;
   payload: Buffer;
-}
-
-export interface EncodedArgusFrame {
-  buffer: Buffer;
 }

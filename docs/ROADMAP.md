@@ -1,112 +1,66 @@
 # Roadmap
 
-## Sprint 0 — Repository Foundation
+Argus is developed in release-sized engineering passes rather than feature-count sprints. Completed work is kept here so the roadmap reflects what the runtime actually does today.
 
-Repository setup, TypeScript configuration, testing configuration, documentation scaffold, custom license, and CI setup.
+## v1.0.0 — Initial Stable Runtime
 
-## Sprint 1 — Binary Framing Core
+Completed:
 
-Build the binary frame specification and protocol layer.
+- binary frame protocol and versioning;
+- TCP client/server request-response RPC;
+- message IDs and request correlation;
+- structured errors and timeouts;
+- PING/PONG heartbeats;
+- retries and exponential backoff;
+- connection pooling;
+- unit, integration, failure-mode and benchmark validation;
+- architecture, protocol and reliability documentation.
 
-Deliverables:
+## v2.0.0 — Protocol, Reliability & Concurrency Rewrite
 
-* Frame types
-* Encoder
-* Decoder
-* Protocol constants
-* Frame validation
+Completed:
 
-## Sprint 2 — TCP Client & Server
+- Argus wire protocol v2 and explicit `CANCEL` frames;
+- distributed deadlines and handler `AbortSignal` cancellation;
+- true multiplexed, out-of-order completion;
+- bounded server concurrency and overload queueing;
+- incremental fragmented TCP decoding with practical frame limits;
+- bounded backpressure-aware writes;
+- canonical RPC statuses and retryability;
+- transient-aware retry policy with jitter and elapsed-time budgets;
+- multiplexed least-loaded connection pooling;
+- failed-channel retirement/replacement;
+- circuit breaker and keepalive primitives;
+- metadata, interceptors, bounded metrics and codec extension primitives;
+- reproducible benchmark methodology;
+- zero runtime dependencies.
 
-Build request/response communication over raw TCP.
+## v2.1.0 — Hot-Path Efficiency & State-Machine Hardening
 
-Deliverables:
+Completed:
 
-* TCP server
-* TCP client
-* Method registry
-* Message IDs
-* Request correlation
+- removed O(n) pending-ID snapshots from request allocation;
+- removed repeated front-of-array dequeue work from chunk, write, limiter and pool-waiter hot paths;
+- cancellation-aware queued server work and retry backoff;
+- strict call/ping response-kind correlation;
+- failed-listen recovery;
+- circuit-breaker half-open validation and race hardening;
+- reduced repeated protocol normalization, enum enumeration and frame-size work;
+- constant-time server method-count statistics;
+- structural complexity regression tests;
+- dedicated v2.1 hot-path benchmark with machine-readable output;
+- plaintext remote-bind refusal by default unless an external trusted transport boundary is explicitly acknowledged.
 
-## Sprint 3 — Errors, Timeouts & Heartbeats
+## Next Engineering Candidates
 
-Introduce reliability behavior.
+These are candidates, not committed release promises:
 
-Deliverables:
+- TLS-native transport support or a first-class secure transport adapter;
+- streaming RPC with explicit flow-control windows;
+- negotiated compression and codec capabilities;
+- service discovery / endpoint resolution policy;
+- cross-language protocol fixtures and interoperability tests;
+- richer benchmark sweeps across payload sizes and connection-pool shapes;
+- deployment reference environments for private-network and public TCP use cases.
 
-* Structured errors
-* Timeout handling
-* Heartbeat system
-* Connection cleanup
-
-## Sprint 4 — Retry & Connection Pool
-
-Introduce resilience features.
-
-Deliverables:
-
-* Retry logic
-* Exponential backoff
-* Connection pooling
-* Health checks
-* Socket cleanup
-
-## Sprint 5 — Benchmarks
-
-Measure protocol behavior against a traditional HTTP JSON baseline.
-
-Metrics:
-
-* Average latency
-* P95 latency
-* Requests per second
-* Success rate
-* Failure rate
-
-## Sprint 6 — Testing & Failure Modes
-
-Expand protocol verification.
-
-Deliverables:
-
-* Unit tests
-* Integration tests
-* Failure-mode tests
-* Benchmark validation tests
-
-## Sprint 7 — Documentation & License
-
-Finalize project documentation and release materials.
-
-Deliverables:
-
-* Protocol documentation
-* Architecture documentation
-* Benchmark documentation
-* Failure-mode documentation
-* Argus Source License
-
-## Sprint 8 — v1.0.0 Release
-
-Release the first stable version of Argus.
-
-Deliverables:
-
-* Final build
-* Final test run
-* Release tag
-* GitHub release
-
-## Future v2 Ideas
-
-The following features are intentionally excluded from v1:
-
-* Streaming
-* Pub/Sub
-* Service discovery
-* Load balancing
-* Circuit breaker
-* Custom binary serializer
-* Dashboard
-
-These may be explored in future versions as the project evolves.
+The project will continue to prefer small, testable protocol/runtime invariants over adding features whose failure behavior is undefined.

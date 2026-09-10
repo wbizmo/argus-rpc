@@ -1,6 +1,6 @@
 {
   "name": "argus-rpc",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "A compact TypeScript RPC runtime over persistent TCP with binary framing, multiplexing, resilience, and observability primitives.",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",

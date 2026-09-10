@@ -1,3 +1,4 @@
+import net from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { ArgusClient, ArgusError, ArgusServer } from "../../src";
 
@@ -19,6 +20,24 @@ describe("Argus server lifecycle", () => {
     await server.listen();
 
     await expect(server.listen()).rejects.toBeInstanceOf(ArgusError);
+  });
+
+  it("recovers cleanly after a failed bind and can listen again", async () => {
+    const blocker = net.createServer();
+    await new Promise<void>((resolve) => blocker.listen(0, "127.0.0.1", resolve));
+    const address = blocker.address();
+    if (!address || typeof address === "string") throw new Error("TEST_INVALID_BLOCKER_ADDRESS");
+
+    server = new ArgusServer();
+    await expect(server.listen(address.port, "127.0.0.1")).rejects.toMatchObject({
+      code: "EADDRINUSE"
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      blocker.close((error) => error ? reject(error) : resolve());
+    });
+
+    await expect(server.listen(address.port, "127.0.0.1")).resolves.toBe(address.port);
   });
 
   it("refuses plaintext non-loopback binds by default", async () => {

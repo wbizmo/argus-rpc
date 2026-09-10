@@ -14,9 +14,11 @@ interface QueuedWrite {
 export class SocketWriter {
   private readonly queue: QueuedWrite[] = [];
   private readonly maxQueuedBytes: number;
+  private queueHead = 0;
   private queuedBytes = 0;
   private writing = false;
   private closed = false;
+  private drainListener: (() => void) | null = null;
 
   constructor(
     private readonly socket: net.Socket,
@@ -71,19 +73,25 @@ export class SocketWriter {
     if (this.closed) return;
     this.closed = true;
 
-    for (const item of this.queue.splice(0)) {
-      item.reject(error);
+    if (this.drainListener) {
+      this.socket.off("drain", this.drainListener);
+      this.drainListener = null;
     }
 
+    for (let index = this.queueHead; index < this.queue.length; index += 1) {
+      this.queue[index]?.reject(error);
+    }
+
+    this.queue.length = 0;
+    this.queueHead = 0;
     this.queuedBytes = 0;
     this.writing = false;
-    this.socket.removeAllListeners("drain");
   }
 
   private pump(): void {
     if (this.writing || this.closed) return;
 
-    const item = this.queue[0];
+    const item = this.queue[this.queueHead];
     if (!item) return;
 
     this.writing = true;
@@ -92,23 +100,29 @@ export class SocketWriter {
     let accepted = true;
     let settled = false;
 
+    const clearDrainListener = (): void => {
+      if (this.drainListener === onDrain) this.drainListener = null;
+      this.socket.off("drain", onDrain);
+    };
+
     const finish = (error?: Error): void => {
       if (settled) return;
 
       if (this.closed) {
         settled = true;
-        this.socket.off("drain", onDrain);
+        clearDrainListener();
         return;
       }
 
       if (!error && (!callbackDone || (!accepted && !drained))) return;
 
       settled = true;
-      this.socket.off("drain", onDrain);
+      clearDrainListener();
 
-      if (this.queue[0] === item) {
-        this.queue.shift();
+      if (this.queue[this.queueHead] === item) {
+        this.queueHead += 1;
         this.queuedBytes = Math.max(0, this.queuedBytes - item.buffer.length);
+        this.compactQueue();
       }
 
       this.writing = false;
@@ -135,10 +149,24 @@ export class SocketWriter {
       });
 
       if (!accepted && !this.closed) {
+        this.drainListener = onDrain;
         this.socket.once("drain", onDrain);
       }
     } catch (error) {
       finish(error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
+  private compactQueue(): void {
+    if (this.queueHead === this.queue.length) {
+      this.queue.length = 0;
+      this.queueHead = 0;
+      return;
+    }
+
+    if (this.queueHead >= 64 && this.queueHead * 2 >= this.queue.length) {
+      this.queue.splice(0, this.queueHead);
+      this.queueHead = 0;
     }
   }
 }

@@ -18,11 +18,16 @@ export enum ArgusStatus {
   UNAUTHENTICATED = "UNAUTHENTICATED"
 }
 
+const ARGUS_STATUSES = new Set<string>(Object.values(ArgusStatus));
 const DEFAULT_RETRYABLE_STATUSES = new Set<ArgusStatus>([
   ArgusStatus.UNAVAILABLE,
   ArgusStatus.RESOURCE_EXHAUSTED,
   ArgusStatus.ABORTED
 ]);
+
+export function isArgusStatus(value: unknown): value is ArgusStatus {
+  return typeof value === "string" && ARGUS_STATUSES.has(value);
+}
 
 export function isRetryableStatus(status: ArgusStatus): boolean {
   return DEFAULT_RETRYABLE_STATUSES.has(status);

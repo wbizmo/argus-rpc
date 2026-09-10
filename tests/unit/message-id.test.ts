@@ -18,6 +18,13 @@ describe("MessageIdAllocator", () => {
     expect(allocator.allocate(inUse)).toBe(2);
   });
 
+  it("accepts the live pending map shape without copying keys", () => {
+    const allocator = new MessageIdAllocator();
+    const pending = new Map<number, unknown>([[1, {}], [2, {}]]);
+
+    expect(allocator.allocate(pending)).toBe(3);
+  });
+
   it("never emits zero because zero is reserved for connection-level errors", () => {
     const allocator = new MessageIdAllocator();
     allocator.setNextForTesting(ARGUS_MAX_MESSAGE_ID);

@@ -105,24 +105,44 @@ export class ArgusServer {
       });
     }
 
-    this.server = net.createServer((socket) => this.handleSocket(socket));
+    const server = net.createServer((socket) => this.handleSocket(socket));
+    this.server = server;
 
-    await new Promise<void>((resolve, reject) => {
-      const onError = (error: Error) => {
-        this.server?.off("listening", onListening);
-        reject(error);
-      };
-      const onListening = () => {
-        this.server?.off("error", onError);
-        resolve();
-      };
-      this.server?.once("error", onError);
-      this.server?.once("listening", onListening);
-      this.server?.listen(port, host);
-    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const cleanup = (): void => {
+          server.off("error", onError);
+          server.off("listening", onListening);
+        };
+        const onError = (error: Error): void => {
+          cleanup();
+          reject(error);
+        };
+        const onListening = (): void => {
+          cleanup();
+          resolve();
+        };
 
-    const address = this.server.address();
+        server.once("error", onError);
+        server.once("listening", onListening);
+
+        try {
+          server.listen(port, host);
+        } catch (error) {
+          cleanup();
+          reject(error);
+        }
+      });
+    } catch (error) {
+      if (this.server === server) this.server = null;
+      server.removeAllListeners();
+      throw error;
+    }
+
+    const address = server.address();
     if (!address || typeof address === "string") {
+      if (this.server === server) this.server = null;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
       throw new ArgusError({
         code: "ARGUS_INVALID_SERVER_ADDRESS",
         message: "Argus server could not resolve a valid listening address"
@@ -276,7 +296,7 @@ export class ArgusServer {
         } finally {
           if (deadlineTimer) clearTimeout(deadlineTimer);
         }
-      });
+      }, controller.signal);
     } catch (error) {
       const argusError = ArgusError.fromUnknown(error, "ARGUS_HANDLER_ERROR");
       this.metricsCollector.increment("rpc.calls.failed");

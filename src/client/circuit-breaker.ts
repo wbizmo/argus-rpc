@@ -23,6 +23,7 @@ export class CircuitBreaker {
   private failures = 0;
   private openedAt = 0;
   private halfOpenActive = 0;
+  private generation = 0;
 
   constructor(options: CircuitBreakerOptions = {}) {
     this.failureThreshold = options.failureThreshold ?? 5;
@@ -37,6 +38,9 @@ export class CircuitBreaker {
     }
     if (!Number.isInteger(this.resetTimeoutMs) || this.resetTimeoutMs < 1) {
       throw new Error("ARGUS_INVALID_CIRCUIT_RESET_TIMEOUT");
+    }
+    if (!Number.isInteger(this.halfOpenMaxCalls) || this.halfOpenMaxCalls < 1) {
+      throw new Error("ARGUS_INVALID_CIRCUIT_HALF_OPEN_LIMIT");
     }
   }
 
@@ -58,21 +62,30 @@ export class CircuitBreaker {
       throw this.openError();
     }
 
-    if (this.currentState === CircuitState.HALF_OPEN) this.halfOpenActive += 1;
+    const startedState = this.currentState;
+    const startedGeneration = this.generation;
+    if (startedState === CircuitState.HALF_OPEN) this.halfOpenActive += 1;
 
     try {
       const result = await operation();
-      this.onSuccess();
+      this.onSuccess(startedState, startedGeneration);
       return result;
     } catch (error) {
-      this.onFailure(error);
+      this.onFailure(error, startedState, startedGeneration);
       throw error;
     } finally {
-      if (this.halfOpenActive > 0) this.halfOpenActive -= 1;
+      if (
+        startedState === CircuitState.HALF_OPEN &&
+        this.currentState === CircuitState.HALF_OPEN &&
+        this.generation === startedGeneration
+      ) {
+        this.halfOpenActive = Math.max(0, this.halfOpenActive - 1);
+      }
     }
   }
 
   reset(): void {
+    this.generation += 1;
     this.currentState = CircuitState.CLOSED;
     this.failures = 0;
     this.openedAt = 0;
@@ -97,23 +110,50 @@ export class CircuitBreaker {
     }
   }
 
-  private onSuccess(): void {
-    this.currentState = CircuitState.CLOSED;
-    this.failures = 0;
-    this.openedAt = 0;
+  private onSuccess(startedState: CircuitState, startedGeneration: number): void {
+    if (startedGeneration !== this.generation) return;
+
+    if (startedState === CircuitState.CLOSED) {
+      if (this.currentState !== CircuitState.CLOSED) return;
+      this.failures = 0;
+      return;
+    }
+
+    if (
+      startedState === CircuitState.HALF_OPEN &&
+      this.currentState === CircuitState.HALF_OPEN &&
+      this.halfOpenActive === 1
+    ) {
+      this.generation += 1;
+      this.currentState = CircuitState.CLOSED;
+      this.failures = 0;
+      this.openedAt = 0;
+      this.halfOpenActive = 0;
+    }
   }
 
-  private onFailure(error: unknown): void {
-    if (!this.shouldCountFailure(error)) return;
+  private onFailure(
+    error: unknown,
+    startedState: CircuitState,
+    startedGeneration: number
+  ): void {
+    if (!this.shouldCountFailure(error) || startedGeneration !== this.generation) return;
+
+    if (startedState === CircuitState.HALF_OPEN) {
+      if (this.currentState === CircuitState.HALF_OPEN) this.openCircuit();
+      return;
+    }
+
+    if (startedState !== CircuitState.CLOSED || this.currentState !== CircuitState.CLOSED) return;
 
     this.failures += 1;
-    if (
-      this.currentState === CircuitState.HALF_OPEN ||
-      this.failures >= this.failureThreshold
-    ) {
-      this.currentState = CircuitState.OPEN;
-      this.openedAt = Date.now();
-    }
+    if (this.failures >= this.failureThreshold) this.openCircuit();
+  }
+
+  private openCircuit(): void {
+    this.generation += 1;
+    this.currentState = CircuitState.OPEN;
+    this.openedAt = Date.now();
   }
 
   private openError(): ArgusError {

@@ -77,4 +77,31 @@ describe("retry utilities", () => {
     })).rejects.toThrow("explicit policy");
     expect(attempts).toBe(3);
   });
+
+  it("aborts retry backoff promptly and does not start another attempt", async () => {
+    const controller = new AbortController();
+    let attempts = 0;
+    const retrying = withRetry(async () => {
+      attempts += 1;
+      throw new ArgusError({
+        code: "ARGUS_TEMPORARY_FAILURE",
+        message: "temporary failure",
+        status: ArgusStatus.UNAVAILABLE
+      });
+    }, {
+      retries: 3,
+      baseDelayMs: 10_000,
+      maxDelayMs: 10_000,
+      jitterRatio: 0
+    }, {
+      signal: controller.signal,
+      abortError: () => new Error("cancelled during backoff")
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    controller.abort();
+
+    await expect(retrying).rejects.toThrow("cancelled during backoff");
+    expect(attempts).toBe(1);
+  });
 });

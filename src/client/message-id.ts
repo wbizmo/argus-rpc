@@ -1,10 +1,15 @@
 import { ARGUS_MAX_MESSAGE_ID } from "../protocol";
 import { ArgusError } from "../errors";
 
+export interface MessageIdSetLike {
+  readonly size: number;
+  has(value: number): boolean;
+}
+
 export class MessageIdAllocator {
   private next = 1;
 
-  allocate(inUse: ReadonlySet<number>): number {
+  allocate(inUse: MessageIdSetLike): number {
     const attempts = inUse.size + 1;
 
     for (let index = 0; index < attempts; index += 1) {

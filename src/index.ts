@@ -7,7 +7,7 @@
  * Williams Ashibuogwu (wbizmo)
  */
 
-export const ARGUS_PACKAGE_VERSION = "2.0.0";
+export const ARGUS_PACKAGE_VERSION = "2.1.0";
 
 export * from "./protocol";
 export * from "./transport";

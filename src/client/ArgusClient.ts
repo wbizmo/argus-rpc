@@ -32,7 +32,10 @@ export interface ArgusCallOptions {
   metadata?: ArgusMetadata;
 }
 
+type PendingKind = "call" | "ping";
+
 interface PendingRequest {
+  kind: PendingKind;
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
   timer: NodeJS.Timeout;
@@ -107,6 +110,9 @@ export class ArgusClient {
     return withRetry(async () => operation(), {
       ...this.retry,
       maxElapsedMs: Math.min(this.retry.maxElapsedMs ?? timeoutMs, timeoutMs)
+    }, {
+      signal: options.signal,
+      abortError: () => cancellationError(method, options.signal?.reason)
     });
   }
 
@@ -145,6 +151,7 @@ export class ArgusClient {
       }, timeoutMs);
 
       this.pending.set(messageId, {
+        kind: "ping",
         resolve: () => resolve(true),
         reject,
         timer,
@@ -229,6 +236,7 @@ export class ArgusClient {
       };
 
       this.pending.set(messageId, {
+        kind: "call",
         resolve: (value) => resolve(value as TResponse),
         reject,
         timer,
@@ -316,6 +324,18 @@ export class ArgusClient {
     const pending = this.pending.get(frame.messageId);
     if (!pending) return;
 
+    if (!isExpectedResponse(pending.kind, frame.type)) {
+      throw new ArgusError({
+        code: "ARGUS_UNEXPECTED_RESPONSE_TYPE",
+        message: `Unexpected ${messageTypeName(frame.type)} for pending ${pending.kind}`,
+        details: {
+          messageId: frame.messageId,
+          pendingKind: pending.kind,
+          receivedType: messageTypeName(frame.type)
+        }
+      });
+    }
+
     clearTimeout(pending.timer);
     pending.cleanup();
     this.pending.delete(frame.messageId);
@@ -362,7 +382,7 @@ export class ArgusClient {
   }
 
   private allocateMessageId(): number {
-    return this.messageIds.allocate(new Set(this.pending.keys()));
+    return this.messageIds.allocate(this.pending);
   }
 
   private getWriter(): SocketWriter {
@@ -383,6 +403,17 @@ export class ArgusClient {
       this.pending.delete(messageId);
     }
   }
+}
+
+function isExpectedResponse(kind: PendingKind, type: ArgusMessageType): boolean {
+  if (type === ArgusMessageType.ERROR) return true;
+  return kind === "ping"
+    ? type === ArgusMessageType.PONG
+    : type === ArgusMessageType.RESPONSE;
+}
+
+function messageTypeName(type: ArgusMessageType): string {
+  return ArgusMessageType[type] ?? String(type);
 }
 
 function deadlineError(method: string, timeoutMs: number): ArgusError {

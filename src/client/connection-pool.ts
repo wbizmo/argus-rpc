@@ -20,7 +20,8 @@ interface PooledConnection {
 interface CapacityWaiter {
   resolve: () => void;
   reject: (error: Error) => void;
-  timer: NodeJS.Timeout;
+  timer?: NodeJS.Timeout;
+  active: boolean;
 }
 
 export class ArgusConnectionPool {
@@ -30,7 +31,9 @@ export class ArgusConnectionPool {
   private readonly clientOptions: ArgusClientOptions;
   private readonly breaker: CircuitBreaker | null;
   private readonly connections: PooledConnection[] = [];
-  private readonly waiters: CapacityWaiter[] = [];
+  private waiters: CapacityWaiter[] = [];
+  private waiterHead = 0;
+  private activeWaiterCount = 0;
   private nextConnectionId = 1;
   private closed = false;
 
@@ -103,8 +106,14 @@ export class ArgusConnectionPool {
       message: "Argus connection pool closed",
       status: ArgusStatus.UNAVAILABLE
     });
-    for (const waiter of this.waiters.splice(0)) {
-      clearTimeout(waiter.timer);
+    const waiters = this.waiters.slice(this.waiterHead);
+    this.waiters.length = 0;
+    this.waiterHead = 0;
+    this.activeWaiterCount = 0;
+    for (const waiter of waiters) {
+      if (!waiter.active) continue;
+      waiter.active = false;
+      if (waiter.timer) clearTimeout(waiter.timer);
       waiter.reject(closeError);
     }
 
@@ -130,7 +139,7 @@ export class ArgusConnectionPool {
       inUse: this.connections.filter((connection) => connection.inFlight > 0).length,
       unhealthy: this.connections.filter((connection) => !connection.healthy).length,
       totalInFlight: this.connections.reduce((sum, connection) => sum + connection.inFlight, 0),
-      waiters: this.waiters.length
+      waiters: this.activeWaiterCount
     };
   }
 
@@ -169,6 +178,7 @@ export class ArgusConnectionPool {
 
     try {
       await connection.client.connect();
+      this.notifyCapacity(this.maxConcurrentPerConnection - connection.inFlight);
       return connection;
     } catch (error) {
       connection.healthy = false;
@@ -193,13 +203,15 @@ export class ArgusConnectionPool {
     if (!connection.healthy) return;
     connection.healthy = false;
     this.remove(connection);
-    await connection.client.close().catch(() => undefined);
     this.notifyCapacity();
+    await connection.client.close().catch(() => undefined);
   }
 
   private release(connection: PooledConnection): void {
     connection.inFlight = Math.max(0, connection.inFlight - 1);
-    this.notifyCapacity();
+    if (connection.healthy && this.connections.includes(connection)) {
+      this.notifyCapacity();
+    }
   }
 
   private remove(connection: PooledConnection): void {
@@ -210,28 +222,65 @@ export class ArgusConnectionPool {
   private waitForCapacity(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       const waiter: CapacityWaiter = {
-        resolve: () => {
-          clearTimeout(waiter.timer);
-          resolve();
-        },
+        resolve,
         reject,
-        timer: setTimeout(() => {
-          const index = this.waiters.indexOf(waiter);
-          if (index >= 0) this.waiters.splice(index, 1);
-          reject(new ArgusError({
-            code: "ARGUS_POOL_ACQUIRE_TIMEOUT",
-            message: `Timed out waiting ${this.acquireTimeoutMs}ms for pool capacity`,
-            status: ArgusStatus.RESOURCE_EXHAUSTED
-          }));
-        }, this.acquireTimeoutMs)
+        active: true
       };
+      waiter.timer = setTimeout(() => {
+        this.settleWaiter(waiter, new ArgusError({
+          code: "ARGUS_POOL_ACQUIRE_TIMEOUT",
+          message: `Timed out waiting ${this.acquireTimeoutMs}ms for pool capacity`,
+          status: ArgusStatus.RESOURCE_EXHAUSTED
+        }));
+      }, this.acquireTimeoutMs);
       this.waiters.push(waiter);
+      this.activeWaiterCount += 1;
     });
   }
 
-  private notifyCapacity(): void {
-    const waiter = this.waiters.shift();
-    waiter?.resolve();
+  private notifyCapacity(count = 1): void {
+    for (let notified = 0; notified < count; notified += 1) {
+      const waiter = this.nextActiveWaiter();
+      if (!waiter) return;
+      this.settleWaiter(waiter);
+    }
+  }
+
+  private nextActiveWaiter(): CapacityWaiter | undefined {
+    this.compactWaiters();
+    while (this.waiterHead < this.waiters.length) {
+      const waiter = this.waiters[this.waiterHead++];
+      if (waiter?.active) return waiter;
+    }
+    this.compactWaiters();
+    return undefined;
+  }
+
+  private settleWaiter(waiter: CapacityWaiter, error?: Error): void {
+    if (!waiter.active) return;
+    waiter.active = false;
+    this.activeWaiterCount = Math.max(0, this.activeWaiterCount - 1);
+    if (waiter.timer) clearTimeout(waiter.timer);
+    if (error) waiter.reject(error);
+    else waiter.resolve();
+    this.compactWaiters();
+  }
+
+  private compactWaiters(): void {
+    while (this.waiterHead < this.waiters.length && !this.waiters[this.waiterHead]?.active) {
+      this.waiterHead += 1;
+    }
+
+    if (this.waiterHead === this.waiters.length) {
+      this.waiters.length = 0;
+      this.waiterHead = 0;
+      return;
+    }
+
+    if (this.waiterHead >= 64 && this.waiterHead * 2 >= this.waiters.length) {
+      this.waiters = this.waiters.slice(this.waiterHead);
+      this.waiterHead = 0;
+    }
   }
 }
 

@@ -10,6 +10,11 @@ export interface RetryOptions {
   random?: () => number;
 }
 
+export interface RetryExecutionOptions {
+  signal?: AbortSignal;
+  abortError?: () => Error;
+}
+
 export interface RetryAttempt {
   attempt: number;
   delayMs: number;
@@ -36,8 +41,29 @@ export function applyBackoffJitter(
   return Math.max(0, Math.round(min + (max - min) * random()));
 }
 
-export async function sleep(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
+export async function sleep(
+  ms: number,
+  signal?: AbortSignal,
+  abortError?: () => Error
+): Promise<void> {
+  if (!signal) {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+    return;
+  }
+  if (signal.aborted) throw resolveAbortError(signal, abortError);
+
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      reject(resolveAbortError(signal, abortError));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 export function isSafeDefaultRetry(error: unknown): boolean {
@@ -46,7 +72,8 @@ export function isSafeDefaultRetry(error: unknown): boolean {
 
 export async function withRetry<T>(
   operation: (attempt: number) => Promise<T>,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
+  execution: RetryExecutionOptions = {}
 ): Promise<T> {
   const retries = options.retries ?? 2;
   const baseDelayMs = options.baseDelayMs ?? 100;
@@ -64,10 +91,13 @@ export async function withRetry<T>(
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= retries + 1; attempt += 1) {
+    throwIfAborted(execution);
+
     try {
       return await operation(attempt);
     } catch (error) {
       lastError = error;
+      throwIfAborted(execution);
 
       if (attempt > retries || !shouldRetry(error, attempt)) {
         throw error;
@@ -83,9 +113,22 @@ export async function withRetry<T>(
         throw error;
       }
 
-      await sleep(delayMs);
+      await sleep(delayMs, execution.signal, execution.abortError);
     }
   }
 
   throw lastError;
+}
+
+function throwIfAborted(execution: RetryExecutionOptions): void {
+  if (execution.signal?.aborted) {
+    throw resolveAbortError(execution.signal, execution.abortError);
+  }
+}
+
+function resolveAbortError(signal: AbortSignal, abortError?: () => Error): Error {
+  if (abortError) return abortError();
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error("ARGUS_RETRY_ABORTED");
 }

@@ -128,7 +128,7 @@ async function main(): Promise<void> {
 
   const result = {
     schemaVersion: 1,
-    commit: process.env.GITHUB_SHA ?? process.env.ARGUS_BENCH_COMMIT ?? "unknown",
+    commit: process.env.ARGUS_BENCH_COMMIT ?? process.env.GITHUB_SHA ?? "unknown",
     environment: {
       node: process.version,
       platform: process.platform,
